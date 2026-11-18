@@ -1329,11 +1329,12 @@ def update_query_log_result_count(log_id, result_count, filters=None):
 # --- Track Search ---
 
 
-def sequence_for_flow(tracks):
+PLAYLIST_ORDERS = {"BPM flow", "BPM ascending", "BPM descending", "Best match"}
+
+
+def sequence_for_flow(tracks, order="BPM flow"):
     """
-    Reorders a track list into a genuine tempo arc — ascending BPM to
-    a peak, then descending back down — rather than the default
-    match-score ordering.
+    Order a track list by BPM, or preserve its search ranking.
 
     Deliberately deterministic (plain sorting), not AI-reasoned.
     Tested directly: asking an LLM to reason about BPM numbers and
@@ -1348,18 +1349,26 @@ def sequence_for_flow(tracks):
     failed) are appended at the end in their original order, since
     they can't be meaningfully placed on a tempo arc.
     """
-    with_bpm = [t for t in tracks if t.get("bpm")]
-    without_bpm = [t for t in tracks if not t.get("bpm")]
+    if order not in PLAYLIST_ORDERS:
+        raise ValueError("Unknown playlist order")
+    if order == "Best match":
+        return tracks
+
+    with_bpm = [t for t in tracks if t.get("bpm") is not None and t["bpm"] > 0]
+    without_bpm = [t for t in tracks if t.get("bpm") is None or t["bpm"] <= 0]
 
     if not with_bpm:
         return tracks  # nothing to sequence, return unchanged
 
-    arc = sorted(with_bpm, key=lambda t: t["bpm"])
-    half = (len(arc) + 1) // 2
-    build_up = arc[:half]
-    wind_down = list(reversed(arc[half:]))
+    ascending = sorted(with_bpm, key=lambda t: t["bpm"])
+    if order == "BPM ascending":
+        return ascending + without_bpm
+    if order == "BPM descending":
+        return list(reversed(ascending)) + without_bpm
 
-    return build_up + wind_down + without_bpm
+    # Interleave the sorted tempos across the rising and falling sides.
+    # This avoids a large jump straight to the peak halfway through.
+    return ascending[::2] + list(reversed(ascending[1::2])) + without_bpm
 
 
 def get_scrobbled_tracks_around_date(target_date, window_days=4):

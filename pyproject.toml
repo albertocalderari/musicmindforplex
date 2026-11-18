@@ -17,6 +17,9 @@ dependencies = [
     "mutagen",
     "requests",
     "pycountry",
+    "reflex>=0.11,<0.12",
+    "fastapi>=0.164.0",
+    "essentia-tensorflow>=2.1b6.dev1438",
 ]
 
 [project.scripts]
@@ -24,7 +27,10 @@ musicmind = "musicmind_cli.cli:main"
 
 [project.optional-dependencies]
 slim = ["essentia"]
-full = ["essentia-tensorflow", "numpy"]
+full = [
+    "essentia-tensorflow",
+    "numpy",
+]
 
 test = [
     "pytest",
@@ -32,7 +38,7 @@ test = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["musicmind", "musicmind.*", "musicmind_cli", "musicmind_cli.*", "web"]
+include = ["musicmind", "musicmind.*", "musicmind_cli", "musicmind_cli.*", "musicmind_ui", "musicmind_ui.*", "web"]
 
 [tool.setuptools.package-data]
 web = ["templates/*.html", "static/*"]

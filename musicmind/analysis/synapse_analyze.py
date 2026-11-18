@@ -161,11 +161,15 @@ def _load_audio_with_transcode_fallback(filepath, sample_rate, MonoLoader):
 
 
 def vi_model_available():
-    """Whether the (deliberately never auto-downloaded, CC BY-NC-SA
-    licensed) VI model file has actually been placed on disk. essentia
-    itself is unconditionally required already (Synapse depends on it
-    too) -- this is the ONLY thing that's genuinely optional here."""
-    return os.path.exists(VI_MODEL)
+    """VI needs both the model and Essentia's TensorFlow-enabled build."""
+    if not os.path.exists(VI_MODEL):
+        return False
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        version("essentia-tensorflow")
+    except PackageNotFoundError:
+        return False
+    return True
 
 
 def init_table(conn):
@@ -617,12 +621,24 @@ def run_analysis(conn, plex, limit=None):
     print("=" * 40)
 
     vi_available = vi_model_available()
-    print(
-        f"VI (voice/instrumental) model: {'found — will run alongside Synapse' if vi_available else 'not found — Synapse only (see models/ in the repo README to enable VI)'}\n"
-    )
+    if vi_available:
+        print("VI (voice/instrumental): model and TensorFlow-enabled Essentia found — running alongside Synapse\n")
+    elif not os.path.exists(VI_MODEL):
+        print("VI (voice/instrumental) model: not found — Synapse only (see models/ in the repo README to enable VI)\n")
+    else:
+        print("VI (voice/instrumental): model found, but Essentia TensorFlow support is missing — run uv sync --extra full\n")
 
     if limit:
         print(f"LIMITED RUN — processing at most {limit} tracks\n")
+
+    if limit is None:
+        # A fresh full run retries failures while retaining successful analysis.
+        synapse_errors_cleared = conn.execute("DELETE FROM synapse_errors").rowcount
+        vi_errors_cleared = 0
+        if vi_available:
+            vi_errors_cleared = conn.execute("DELETE FROM vi_results WHERE verdict = 'ERROR'").rowcount
+        conn.commit()
+        print(f"Cleared {synapse_errors_cleared} Synapse and {vi_errors_cleared} VI errors for retry.\n")
 
     tracks = get_unanalyzed_tracks(conn, plex, limit=limit)
     total = len(tracks)

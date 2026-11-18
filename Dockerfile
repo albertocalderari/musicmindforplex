@@ -30,10 +30,18 @@
 # real Docker environment to test against. A hardened non-root setup
 # is a reasonable future improvement once this base path is proven.
 
+FROM node:24-slim AS node
+
 FROM python:3.14-slim
+
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/bin/npm /usr/local/bin/npm
+COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 
 ARG VARIANT=slim
 ENV MUSICMIND_VARIANT=${VARIANT}
+ENV REFLEX_USE_NPM=1
+ENV REFLEX_DIR=/app/.reflex
 
 # System dependencies:
 #   ffmpeg   — transcode fallback for files fpcalc/essentia can't
@@ -72,6 +80,10 @@ COPY . .
 RUN case "$VARIANT" in slim|full) ;; *) echo "Unknown variant: $VARIANT" >&2; exit 1 ;; esac \
     && pip install --no-cache-dir ".[${VARIANT}]"
 
+# Build the Reflex frontend while no credentials are present. At runtime the
+# entrypoint writes config.py before starting the single-port ASGI server.
+RUN reflex export --no-zip --no-ssr
+
 # bin/fpcalc is a real, committed binary (statically-linked x86-64
 # Linux, verified — no glibc compatibility concerns on this base
 # image) but git doesn't reliably preserve the executable bit across
@@ -88,4 +100,4 @@ VOLUME ["/app/data", "/app/models"]
 EXPOSE 8787
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["python3", "-m", "web.app"]
+CMD ["python3", "-m", "musicmind_cli", "serve", "--production"]

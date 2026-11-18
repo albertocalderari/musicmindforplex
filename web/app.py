@@ -5,6 +5,7 @@ MusicMind for Plex - Flask Web UI
 
 import sys
 import os
+import re
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,6 +17,7 @@ from musicmind.brain import (
     classify_prompt,
     search_tracks,
     sequence_for_flow,
+    PLAYLIST_ORDERS,
     create_playlist,
     PlexServer,
     PLEX_URL,
@@ -66,6 +68,9 @@ def onthisday():
     ISO date, not natural language needing interpretation.
     """
     data = request.json
+    order = data.get("order") or "BPM flow"
+    if order not in PLAYLIST_ORDERS:
+        return jsonify({"error": "Unknown playlist order"}), 400
     target_date = data.get("date", "").strip()
     if not target_date:
         return jsonify({"error": "No date provided"}), 400
@@ -86,10 +91,7 @@ def onthisday():
 
     tracks = search_tracks([], filters)
 
-    # DJ-ify sequencing now runs unconditionally on every playlist
-    # -- no longer a user-facing toggle, this is just what building
-    # a playlist means now.
-    tracks = sequence_for_flow(tracks)
+    tracks = sequence_for_flow(tracks, order)
 
     return jsonify(
         {
@@ -148,6 +150,9 @@ def based_on():
     data, AI only as a last-resort fallback) depending on what the
     user picked."""
     data = request.json
+    order = data.get("order") or "BPM flow"
+    if order not in PLAYLIST_ORDERS:
+        return jsonify({"error": "Unknown playlist order"}), 400
     seed_type = data.get("type")
     limit = int(data.get("limit", 30))
     max_per_artist = int(data.get("max_per_artist", 3))
@@ -172,9 +177,9 @@ def based_on():
                 intent="based_on_track",
             )
             update_query_log_result_count(
-                log_id, len(results), {"limit": limit, "max_per_artist": max_per_artist}
+                log_id, len(results), {"limit": limit, "max_per_artist": max_per_artist, "order": order}
             )
-            return jsonify({"tracks": results, "mode": "track"})
+            return jsonify({"tracks": sequence_for_flow(results, order), "mode": "track"})
         elif seed_type == "artist":
             artist = data.get("value")
             if not artist:
@@ -188,9 +193,9 @@ def based_on():
             update_query_log_result_count(
                 log_id,
                 len(results),
-                {"limit": limit, "max_per_artist": max_per_artist, "source": source},
+                {"limit": limit, "max_per_artist": max_per_artist, "source": source, "order": order},
             )
-            return jsonify({"tracks": results, "mode": "artist", "source": source})
+            return jsonify({"tracks": sequence_for_flow(results, order), "mode": "artist", "source": source})
         else:
             return jsonify({"error": "Unknown seed type"}), 400
     except Exception as e:
@@ -245,6 +250,9 @@ def handle_openai_error(e):
 @app.route("/preview", methods=["POST"])
 def preview():
     data = request.json
+    order = data.get("order") or "BPM flow"
+    if order not in PLAYLIST_ORDERS:
+        return jsonify({"error": "Unknown playlist order"}), 400
     prompt = data.get("prompt", "").strip()
     bucket_names = (
         data.get("buckets") or None
@@ -339,6 +347,7 @@ def preview():
             "bpm_min": int(data["bpm_min"]) if data.get("bpm_min") else None,
             "bpm_max": int(data["bpm_max"]) if data.get("bpm_max") else None,
             "danceability": data.get("danceability") or None,
+            "order": order,
             "bucket_names": bucket_names,
             "lastfm_rating_keys": lastfm_rating_keys,
             "title_search": classification.get("title_search"),
@@ -365,9 +374,7 @@ def preview():
         tracks = search_tracks(tags, filters)
         update_query_log_result_count(query_log_id, len(tracks), filters)
 
-        # DJ-ify sequencing now runs unconditionally on every
-        # playlist -- no longer a user-facing toggle.
-        tracks = sequence_for_flow(tracks)
+        tracks = sequence_for_flow(tracks, order)
 
         response = {
             "tags": tags,
@@ -375,7 +382,8 @@ def preview():
             "intent": intent,
             "search_term": search_term,
             "detected_filters": detected_filters,
-            "dj_ified": True,
+            "dj_ified": order == "BPM flow",
+            "playlist_order": order,
         }
 
         # Found via July 2026 fresh-install sanity check: checking
@@ -2215,6 +2223,10 @@ def stats_data():
     listening_by_year = conn.execute(
         "SELECT strftime('%Y', datetime(timestamp, 'unixepoch', 'localtime')) as year, COUNT(*) as plays FROM lastfm_scrobbles GROUP BY year ORDER BY year"
     ).fetchall()
+    listening_by_month = conn.execute(
+        "SELECT strftime('%Y-%m', datetime(timestamp, 'unixepoch', 'localtime')) as month, COUNT(*) as plays FROM lastfm_scrobbles GROUP BY month ORDER BY month"
+    ).fetchall()
+    listening_granularity = "month" if len(listening_by_year) < 4 else "year"
 
     top_artists = conn.execute(
         "SELECT COALESCE(real_artist, artist) as artist, SUM(play_count) as plays FROM tracks WHERE play_count > 0 AND artist IS NOT NULL AND artist != '' AND LOWER(COALESCE(real_artist, artist)) NOT IN ('various artists', 'va') GROUP BY COALESCE(real_artist, artist) ORDER BY plays DESC LIMIT ?",
@@ -2225,10 +2237,29 @@ def stats_data():
         "SELECT tag, COUNT(*) as cnt FROM track_tags GROUP BY tag ORDER BY cnt DESC LIMIT ?",
         (genre_limit,),
     ).fetchall()
+    genre_source = "tags"
+    if not top_genres:
+        top_genres = conn.execute(
+            "SELECT TRIM(genre) as tag, COUNT(*) as cnt FROM tracks "
+            "WHERE genre IS NOT NULL AND TRIM(genre) != '' "
+            "GROUP BY TRIM(genre) ORDER BY cnt DESC LIMIT ?",
+            (genre_limit,),
+        ).fetchall()
+        genre_source = "plex"
 
     by_era = conn.execute(
-        "SELECT era, COUNT(*) as cnt FROM artist_meta WHERE era != 'unknown' AND era IS NOT NULL GROUP BY era ORDER BY era"
+        "SELECT era, COUNT(*) as cnt FROM artist_meta WHERE era != 'unknown' AND era IS NOT NULL GROUP BY era"
     ).fetchall()
+    def decade_sort(row):
+        match = re.match(r"\d+", row[0] or "")
+        if not match:
+            return (1, row[0] or "")
+        digits = match.group(0)
+        decade = int(digits)
+        if len(digits) <= 2:
+            decade += 2000 if decade < 30 else 1900
+        return (0, decade)
+    by_era.sort(key=decade_sort)
 
     # Raw per-string counts first (no LIMIT here -- limiting before
     # canonicalizing would let "US" and "United States" each occupy a
@@ -2271,8 +2302,13 @@ def stats_data():
             "listening_by_year": [
                 {"year": r[0], "plays": r[1]} for r in listening_by_year
             ],
+            "listening_by_month": [
+                {"month": r[0], "plays": r[1]} for r in listening_by_month
+            ],
+            "listening_granularity": listening_granularity,
             "top_artists": [{"artist": r[0], "plays": r[1]} for r in top_artists],
             "top_genres": [{"tag": r[0], "cnt": r[1]} for r in top_genres],
+            "genre_source": genre_source,
             "by_era": [{"era": r[0], "cnt": r[1]} for r in by_era],
             "by_country": [{"country": r[0], "cnt": r[1]} for r in by_country],
             "by_gender": [{"gender": r[0], "cnt": r[1]} for r in by_gender],

@@ -1,3 +1,8 @@
+assets/external/
+.web
+.states
+*.py[cod]
+job_logs/
 # Credentials — never commit these
 config.py
 

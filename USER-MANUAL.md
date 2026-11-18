@@ -68,7 +68,8 @@ sudo python3.12 -m musicmind.plex.write_genres_to_plex --run    # Write genres t
 **5. Start the web app**
 
 ```bash
-sudo pm2 start python3.12 --name "musicmind" -- ~/musicmind/web/app.py
+cd ~/musicmind
+sudo pm2 start .venv/bin/python --name "musicmind" -- -m musicmind_cli serve
 sudo pm2 save
 ```
 

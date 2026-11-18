@@ -65,8 +65,21 @@ Start below is for a direct, native install instead.
 For a local virtual environment, run `make install`, copy
 `config.example.py` to `config.py`, then run `make run`. Use
 `make install-full` for TensorFlow-backed voice/instrumental detection.
-The Makefile requires `uv` and uses `python3.12` by default; set
-`PYTHON` to another compatible interpreter if needed.
+The Makefile requires `uv` and uses the Python version in `.python-version`.
+On Apple Silicon it selects the native `~/.local/bin/uv` when present.
+
+For local voice/instrumental analysis, install the full variant and place
+Essentia's model in `models/`:
+
+```bash
+make install-full
+mkdir -p models
+curl -fL https://essentia.upf.edu/models/classifiers/voice_instrumental/voice_instrumental-musicnn-msd-1.pb -o models/voice_instrumental-musicnn-msd-1.pb
+```
+
+Model files are ignored by Git. The full Docker variant downloads this model
+into its persistent model volume. If Plex reports paths from another machine,
+set `PATH_MAP` in `config.py` so audio analysis can open the local files.
 
 The installable `musicmind_cli` package provides a `musicmind` command.
 Run it from the directory containing your `config.py`:
@@ -74,8 +87,15 @@ Run it from the directory containing your `config.py`:
 ```bash
 uv run musicmind db init   # create all database tables without contacting Plex
 uv run musicmind ingest    # import your Plex music library
-uv run musicmind serve     # start the web server on port 8787
+uv run musicmind serve     # start with auto reload on port 8787
+uv run musicmind serve --production  # fixed production build
 ```
+
+The web interface is built with Reflex and needs Node.js 22.22 or newer and npm
+on the machine running it. `musicmind serve` starts Reflex development mode with
+frontend hot reload at port 8787 and the backend at port 8788. Frontend changes
+appear in the open browser automatically. Use `--production` for the single-port
+fixed build used by Docker.
 
 The database command is safe to repeat: it adds missing tables and columns
 without importing data.
@@ -161,7 +181,8 @@ without importing data.
 4. Start the web app
 
    ```bash
-   sudo pm2 start python3.12 --name "musicmind" -- ~/musicmind/web/app.py
+   cd ~/musicmind
+   sudo pm2 start .venv/bin/python --name "musicmind" -- -m musicmind_cli serve
    sudo pm2 save
    ```
 
@@ -293,7 +314,8 @@ OpenAI API costs are low. In real day-to-day use — including frequent testing 
 | `musicmind/plex/`       | Plex tagging, playlists, genres, and authentication        |
 | `musicmind/db/`         | Database maintenance commands                              |
 | `musicmind/migrations/` | Database migrations                                        |
-| `web/`                  | Flask app, templates, and static assets                    |
+| `musicmind_ui/`         | Reflex pages, state, and durable job launcher               |
+| `web/`                  | Compatibility API handlers and static assets                |
 
 Run commands from the repository root with `python3.12 -m musicmind.<module>`.
 
