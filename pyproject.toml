@@ -7,7 +7,7 @@ name = "musicmindforplex"
 version = "3.1.1"
 description = "MusicMind for Plex music library companion"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
