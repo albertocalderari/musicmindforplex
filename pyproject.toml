@@ -28,6 +28,7 @@ musicmind = "musicmind_cli.cli:main"
 slim = ["essentia"]
 full = [
     "essentia-tensorflow>=2.1b6.dev1438",
+    "tensorflow==2.22.0rc0",
     "numpy",
 ]
 
