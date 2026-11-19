@@ -1451,22 +1451,15 @@ def other_processes_status():
 
 def _run_fullsync_pipeline():
     """
-    Runs the actual Full Sync pipeline (Plex scan + all ten pipeline
-    scripts), writing every line to FULLSYNC_LOG_PATH as it goes.
+    Runs the Full Sync pipeline with independent scripts scheduled
+    concurrently after their prerequisites complete.
 
     Found real (Aug 2026): even after tail_subprocess() fixed the
-    per-script pipe deadlock, a Full Sync still silently stopped
-    mid-pipeline the moment the browser tab disconnected -- because
-    the loop walking through all ten scripts lived inside the SAME
-    generator function that was directly streaming to the SSE
-    response. A dropped connection throws GeneratorExit at that
-    generator's current yield point, permanently unwinding the loop --
-    the individual subprocess that happened to be running might
-    finish fine on its own (file-backed now, no longer PIPE-deadlock
-    prone), but nothing was left alive to start the NEXT step.
-    Confirmed live: a real run froze mid-copy_forward_analysis.py
-    with no process left running and no error logged anywhere,
-    exactly matching this failure mode.
+    Full Sync remains independent of its HTTP/UI watcher. The worker
+    schedules each script only after its data prerequisites complete,
+    and lets unrelated scripts run concurrently. A disconnected status
+    viewer therefore cannot interrupt active work or prevent later
+    independent stages from starting.
 
     This function has ZERO dependency on any HTTP connection -- it's
     started once via threading.Thread from the /run/fullsync route
@@ -1474,17 +1467,52 @@ def _run_fullsync_pipeline():
     anyone, is watching. /run/fullsync and /run/fullsync-tail are now
     both pure log-file tailers; neither one drives the pipeline.
     """
+    import json
     import time
     from plexapi.server import PlexServer as PS
 
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from threading import Lock
+
     log_file = open(FULLSYNC_LOG_PATH, "w")
+    log_lock = Lock()
+    progress_lock = Lock()
+    progress_path = os.path.join(BASE_DIR, "job_logs", "fullsync_progress.json")
+    os.makedirs(os.path.dirname(progress_path), exist_ok=True)
+    progress_state = {"phase": "Starting Plex scan", "step": 0, "progress": 0,
+                      "total": 12, "finished": False, "active": []}
+
+    def update_progress(*, phase=None, step=None, finished=None,
+                        start_stage=None, finish_stage=None):
+        with progress_lock:
+            if phase is not None:
+                progress_state["phase"] = phase
+            if step is not None:
+                progress_state["step"] = step
+                progress_state["progress"] = min(94, round(step / 12 * 94))
+            if finished is not None:
+                progress_state["finished"] = finished
+            if start_stage and start_stage not in progress_state["active"]:
+                progress_state["active"].append(start_stage)
+            if finish_stage and finish_stage in progress_state["active"]:
+                progress_state["active"].remove(finish_stage)
+            if progress_state["finished"] and progress_state["phase"] == "Full sync complete":
+                progress_state["progress"] = 100
+            temporary_path = progress_path + ".tmp"
+            with open(temporary_path, "w") as progress_file:
+                json.dump(progress_state, progress_file)
+                progress_file.flush()
+                os.fsync(progress_file.fileno())
+            os.replace(temporary_path, progress_path)
 
     def log_line(text):
-        log_file.write(text + "\n")
-        log_file.flush()
+        with log_lock:
+            log_file.write(text + "\n")
+            log_file.flush()
 
     try:
         # Step 1: Trigger Plex scan
+        update_progress(phase="Starting Plex scan")
         log_line("🔍 Triggering Plex library scan...")
         plex = PS(PLEX_URL, PLEX_TOKEN)
         music = plex.library.section(MUSIC_LIB)
@@ -1500,6 +1528,7 @@ def _run_fullsync_pipeline():
         # music.reload() forces a real re-fetch of just this
         # object's own state, bypassing the cache correctly.
         log_line("⏳ Waiting for Plex scan to complete...")
+        update_progress(phase="Waiting for Plex scan")
         max_wait_iterations = 360  # 5s * 360 = 30 minutes safety cap
         waited = 0
         while True:
@@ -1518,62 +1547,96 @@ def _run_fullsync_pipeline():
                 break
             log_line("⏳ Still scanning...")
         log_line("✅ Plex scan complete.")
+        log_line("FULLSYNC_DONE:plex_scan")
+        update_progress(phase="Plex scan complete", step=1)
 
-        # Steps 3-5: Run scripts in sequence
-        scripts = [
-            ("🔄 Syncing Plex Library...", MODULES["ingest.py"]),
-            (
-                "🔗 Fingerprinting new tracks...",
-                MODULES["fingerprint_tracks.py"],
-            ),
-            (
-                "♻️ Checking for known duplicates...",
-                MODULES["copy_forward_analysis.py"],
-            ),
-            (
-                "🎭 Resolving Various Artists tracks...",
-                MODULES["va_resolve.py"],
-            ),
-            (
-                "🏷️ Enriching compilations (ID3 fallback)...",
-                MODULES["enrich_compilations.py"],
-            ),
-            (
-                "🎼 Resolving recording IDs...",
-                MODULES["resolve_recording_mbids.py"],
-            ),
-            ("🎵 Syncing Last.fm...", MODULES["sync.py"]),
-            (
-                "🔍 Enriching artists (MusicBrainz)...",
-                MODULES["mb_enrich_artists.py"],
-            ),
-            (
-                "🤖 Enriching artists (AI fallback)...",
-                MODULES["enrich_artists.py"],
-            ),
-            ("🏷️ Tagging new tracks...", MODULES["tag_tracks.py"]),
-            (
-                "🧠 Analyzing audio (Synapse: BPM/key/danceability)...",
-                MODULES["synapse_analyze.py"],
-            ),
-        ]
-        for label, script in scripts:
+        stages = {
+            "ingest": ("🔄 Syncing Plex Library...", MODULES["ingest.py"], ()),
+            "fingerprint": ("🔗 Fingerprinting new tracks...", MODULES["fingerprint_tracks.py"], ("ingest",)),
+            "lastfm": ("🎵 Syncing Last.fm...", MODULES["sync.py"], ("enrich_compilations",)),
+            "va_resolve": ("🎭 Resolving Various Artists tracks...", MODULES["va_resolve.py"], ("ingest",)),
+            "mb_enrich": ("🔍 Enriching artists (MusicBrainz)...", MODULES["mb_enrich_artists.py"], ("enrich_compilations",)),
+            "tag_tracks": ("🏷️ Tagging new tracks...", MODULES["tag_tracks.py"], ("enrich_compilations",)),
+            "copy_forward": ("♻️ Checking for known duplicates...", MODULES["copy_forward_analysis.py"], ("fingerprint",)),
+            "recording_mbids": ("🎼 Resolving recording IDs...", MODULES["resolve_recording_mbids.py"], ("copy_forward",)),
+            "enrich_compilations": ("🏷️ Enriching compilations (ID3 fallback)...", MODULES["enrich_compilations.py"], ("va_resolve",)),
+            "ai_enrich": ("🤖 Enriching artists (AI fallback)...", MODULES["enrich_artists.py"], ("mb_enrich",)),
+            "synapse": ("🧠 Analyzing audio (Synapse: BPM/key/danceability)...", MODULES["synapse_analyze.py"], ("copy_forward",)),
+        }
+
+        def run_stage(stage_id, label, module):
+            update_progress(phase=label, start_stage=stage_id)
             log_line(label)
-            sync_result = {}
-            for line in tail_subprocess(
-                [sys.executable, "-u", "-m", script],
-                sync_result,
-                extra_popen_kwargs={"start_new_session": True},
-            ):
-                log_line(line)
-            if sync_result.get("returncode", 1) != 0:
-                log_line(f"❌ Error in {script}")
-                return
+            result = {}
+            try:
+                for line in tail_subprocess(
+                    [sys.executable, "-u", "-m", module],
+                    result,
+                ):
+                    log_line(f"[{stage_id}] {line}")
+            except Exception as exc:
+                log_line(f"[{stage_id}] ❌ {exc}")
+                return 1
+            return result.get("returncode", 1)
+
+        # Ingest is the gate for all library work. After it completes,
+        # independent tasks are launched together; stages that touch the
+        # same derived data wait for their specific prerequisite.
+        completed = {"plex_scan"}
+        failed = {}
+        pending = set(stages)
+        futures = {}
+        max_parallel = 6
+        with ThreadPoolExecutor(max_workers=max_parallel, thread_name_prefix="fullsync") as pool:
+            while pending or futures:
+                scheduled_or_skipped = False
+                for stage_id, (label, module, dependencies) in stages.items():
+                    if stage_id not in pending:
+                        continue
+                    failed_dependencies = [dep for dep in dependencies if dep in failed]
+                    if failed_dependencies:
+                        pending.remove(stage_id)
+                        failed[stage_id] = f"dependency failed: {', '.join(failed_dependencies)}"
+                        log_line(f"⚠️ Skipping {stage_id}; {failed[stage_id]}.")
+                        scheduled_or_skipped = True
+                    elif set(dependencies) <= completed and len(futures) < max_parallel:
+                        future = pool.submit(run_stage, stage_id, label, module)
+                        futures[future] = stage_id
+                        pending.remove(stage_id)
+                        scheduled_or_skipped = True
+
+                if futures:
+                    finished, _ = wait(futures, return_when=FIRST_COMPLETED)
+                    for future in finished:
+                        stage_id = futures.pop(future)
+                        try:
+                            exit_code = future.result()
+                        except Exception as exc:
+                            exit_code = 1
+                            log_line(f"[{stage_id}] ❌ Worker failed: {exc}")
+                        if exit_code == 0:
+                            completed.add(stage_id)
+                            log_line(f"FULLSYNC_DONE:{stage_id}")
+                            update_progress(step=len(completed), finish_stage=stage_id)
+                        else:
+                            failed[stage_id] = f"exit code {exit_code}"
+                            log_line(f"❌ Error in {stage_id} ({failed[stage_id]}).")
+                            update_progress(finish_stage=stage_id)
+                elif pending and not scheduled_or_skipped:
+                    log_line("❌ Full sync scheduler stalled; unresolved dependencies remain.")
+                    return
+
+        if failed:
+            update_progress(phase="Stopped with an error", finished=True)
+            log_line(f"❌ Full sync finished with {len(failed)} failed or skipped stage(s).")
+            return
 
         log_line("✅ Full sync complete.")
+        update_progress(phase="Full sync complete", step=12, finished=True)
 
     except Exception as e:
         log_line(f"❌ Exception: {e}")
+        update_progress(phase="Stopped with an error", finished=True)
     finally:
         running["fullsync"] = False
         log_file.close()
@@ -2003,7 +2066,9 @@ def playlist_audit_data(playlist_key):
 
     try:
         plex = PlexServer(PLEX_URL, PLEX_TOKEN)
-        playlist = plex.fetchItem(playlist_key)
+        # Numeric fetchItem keys resolve to /library/metadata, which is
+        # for library media. Playlists have their own Plex API namespace.
+        playlist = plex.fetchItem(f"/playlists/{playlist_key}")
         items = playlist.items()
     except Exception as e:
         return jsonify({"error": f"Could not load playlist: {e}"}), 404

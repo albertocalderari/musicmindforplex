@@ -34,9 +34,7 @@ FROM node:24-slim AS node
 
 FROM python:3.14-slim
 
-COPY --from=node /usr/local/bin/node /usr/local/bin/node
-COPY --from=node /usr/local/bin/npm /usr/local/bin/npm
-COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+COPY --from=node /usr/local/ /usr/local/
 
 ARG VARIANT=slim
 ENV MUSICMIND_VARIANT=${VARIANT}

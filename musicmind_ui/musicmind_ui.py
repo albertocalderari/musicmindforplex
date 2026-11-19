@@ -58,7 +58,7 @@ def _guide() -> str:
     return (PROJECT_ROOT / "USER-MANUAL.md").read_text()
 
 
-def _home_stats() -> dict[str, str]:
+def _home_stats() -> dict[str, int]:
     totals = {"tracks": 0, "artists": 0, "plays": 0}
     conn = sqlite3.connect(DB_PATH, timeout=10)
     try:
@@ -72,7 +72,7 @@ def _home_stats() -> dict[str, str]:
         pass  # A fresh install may not have created the library tables yet.
     finally:
         conn.close()
-    return {key: f"{value:,}" for key, value in totals.items()}
+    return totals
 
 
 class UI(rx.State):
@@ -89,7 +89,8 @@ class UI(rx.State):
     tracks: list[dict] = []
     tags: list[str] = []
     playlists: list[dict] = []
-    home_stats: dict[str, str] = {"tracks": "0", "artists": "0", "plays": "0", "playlists": "0"}
+    home_stats: dict[str, int] = {"tracks": 0, "artists": 0, "plays": 0, "playlists": 0}
+    home_stats_display: dict[str, str] = {"tracks": "0", "artists": "0", "plays": "0", "playlists": "0"}
     plex_machine_id: str = ""
     genres: list[dict] = []
     countries: list[dict] = []
@@ -128,15 +129,22 @@ class UI(rx.State):
     query_columns: list[str] = []
     query_rows: list[list[str]] = []
     gaps: list[dict] = []
+    gap_buckets: list[dict] = []
     selected_job: str = "fullsync"
+    selected_job_label: str = "Full sync"
     job_log: str = ""
     job_running: bool = False
+    job_dialog_open: bool = False
+    fullsync_phase: str = "Waiting to start"
+    fullsync_progress: int = 0
+    fullsync_step: int = 0
     running_jobs: list[str] = []
     open_job_groups: list[str] = []
     synapse: dict = {}
     synapse_errors: list[dict] = []
     playlist_key: str = ""
     audit: dict = {}
+    audit_tracks: list[dict[str, str]] = []
     update_info: dict = {}
     guide_text: str = ""
 
@@ -231,7 +239,17 @@ class UI(rx.State):
                 {**item, "url": f"https://app.plex.tv/desktop/#!/server/{self.plex_machine_id}/playlist?key=%2Fplaylists%2F{item['key']}"}
                 for item in playlists.get("playlists", [])
             ]
-            self.home_stats = {**home_stats, "playlists": f"{len(self.playlists):,}"}
+            self.home_stats = {**home_stats, "playlists": len(self.playlists)}
+            self.home_stats_display = {key: "0" for key in self.home_stats}
+            yield
+            for step in range(1, 25):
+                progress = 1 - (1 - step / 24) ** 3
+                self.home_stats_display = {
+                    key: f"{round(value * progress):,}"
+                    for key, value in self.home_stats.items()
+                }
+                yield
+                await asyncio.sleep(0.025)
         except Exception as exc:
             self.message = str(exc)
 
@@ -313,7 +331,8 @@ class UI(rx.State):
                 "name": self.playlist_name, "rating_keys": [t["rating_key"] for t in self.tracks],
                 "prompt": self.prompt})
             self.message = f"Created {result.get('name')} with {result.get('count')} tracks in Plex"
-            await self.home_load()
+            async for _ in self.home_load():
+                yield
         except Exception as exc:
             self.message = str(exc)
         finally:
@@ -381,6 +400,16 @@ class UI(rx.State):
             return [{"category": r[0], "artist": r[1], "scrobbles": r[2]} for r in rows]
         try:
             self.gaps = await asyncio.to_thread(load)
+            categories = [("worth_acquiring", "Worth acquiring", "Frequently played artists to add to your collection.", "music"),
+                          ("classical", "Classical", "Composers and performers missing from your library.", "piano"),
+                          ("ambient_meditation", "Ambient / Meditation", "Atmospheric and meditative listening to revisit.", "waves"),
+                          ("unknown", "Unknown", "Artists whose category has not been identified.", "circle-help")]
+            self.gap_buckets = [
+                {"key": key, "label": label, "description": description,
+                 "artists": [dict(row) for row in self.gaps if (row["category"] or "unknown") == key],
+                 "count": sum(1 for row in self.gaps if (row["category"] or "unknown") == key)}
+                for key, label, description, icon in categories
+            ]
         except Exception as exc:
             self.message = str(exc)
 
@@ -389,18 +418,28 @@ class UI(rx.State):
             result = await asyncio.to_thread(jobs.status, self.selected_job)
             self.job_log = result["log"]
             self.job_running = result["running"]
+            if self.selected_job == "fullsync":
+                self.fullsync_phase = result.get("phase", "Waiting to start")
+                self.fullsync_progress = result.get("progress", 0)
+                self.fullsync_step = result.get("step", 0)
             current = [name for name in self.running_jobs if name != self.selected_job]
             self.running_jobs = current + ([self.selected_job] if self.job_running else [])
         except Exception as exc:
             self.message = str(exc)
 
     async def jobs_load(self):
-        names = [name for group, _, entries in JOB_GROUPS for name, _, _ in entries]
+        names = ["fullsync"]
+        names.extend(name for group, _, entries in JOB_GROUPS for name, _, _ in entries)
         names.extend(["synapse_full", "synapse_limited"])
         names.extend(jobs.GROUP_COMMANDS)
         results = await asyncio.gather(*[
             asyncio.to_thread(jobs.status, name) for name in names
         ], return_exceptions=True)
+        fullsync_result = results[0]
+        if isinstance(fullsync_result, dict):
+            self.fullsync_phase = fullsync_result.get("phase", "Waiting to start")
+            self.fullsync_progress = fullsync_result.get("progress", 0)
+            self.fullsync_step = fullsync_result.get("step", 0)
         self.running_jobs = [name for name, result in zip(names, results)
                              if isinstance(result, dict) and result["running"]]
         try:
@@ -409,17 +448,37 @@ class UI(rx.State):
             self.message = str(exc)
         await self.job_load()
 
-    async def watch_job(self):
-        while self.job_running:
+    async def admin_load(self):
+        self.job_dialog_open = False
+        await self.jobs_load()
+        return UI.poll_jobs
+
+    @rx.event(background=True)
+    async def poll_jobs(self):
+        while True:
             await asyncio.sleep(1.5)
-            await self.jobs_load()
-            yield
+            async with self:
+                await self.jobs_load()
+                active = bool(self.running_jobs)
+            if not active:
+                break
+
+    async def watch_job(self):
+        # Queue polling as a background task, releasing the event queue so
+        # Status, Close, and other controls respond during long jobs.
+        yield UI.poll_jobs
 
     async def select_job(self, name: str):
         self.selected_job = name
+        self.selected_job_label = _job_label(name)
+        self.job_dialog_open = True
+        yield
         await self.job_load()
         async for _ in self.watch_job():
             yield
+
+    def set_job_dialog_open(self, is_open: bool):
+        self.job_dialog_open = is_open
 
     def toggle_job_group(self, group: str):
         self.open_job_groups = ([name for name in self.open_job_groups if name != group]
@@ -428,6 +487,9 @@ class UI(rx.State):
 
     async def start_job(self, name: str):
         self.selected_job = name
+        self.selected_job_label = _job_label(name)
+        self.job_dialog_open = True
+        yield
         try:
             await asyncio.to_thread(jobs.start, name)
             self.message = f"{name} started"
@@ -447,6 +509,9 @@ class UI(rx.State):
 
     async def start_resync(self):
         self.selected_job = "resync"
+        self.selected_job_label = _job_label("resync")
+        self.job_dialog_open = True
+        yield
         try:
             args = [self.resync_artist, self.resync_album]
             if self.resync_apply:
@@ -454,15 +519,22 @@ class UI(rx.State):
             await asyncio.to_thread(jobs.start, "resync", args)
             self.message = "Resync started"
             await self.job_load()
+            async for _ in self.watch_job():
+                yield
         except Exception as exc:
             self.message = str(exc)
 
     async def start_synapse_limited(self):
         self.selected_job = "synapse_limited"
+        self.selected_job_label = _job_label("synapse_limited")
+        self.job_dialog_open = True
+        yield
         try:
             await asyncio.to_thread(jobs.start, "synapse_limited", [self.synapse_limit])
             self.message = "Limited Synapse run started"
             await self.job_load()
+            async for _ in self.watch_job():
+                yield
         except Exception as exc:
             self.message = str(exc)
 
@@ -497,8 +569,23 @@ class UI(rx.State):
             self.message = str(exc)
 
     async def audit_load(self):
+        key = self.playlist_key.strip()
+        if not key.isdigit():
+            self.message = "Select a playlist or enter its numeric Plex playlist ID."
+            return
         try:
-            self.audit = await asyncio.to_thread(_legacy, "GET", f"/playlist-audit-data/{self.playlist_key}")
+            self.audit = {}
+            self.audit_tracks = []
+            self.audit = await asyncio.to_thread(_legacy, "GET", f"/playlist-audit-data/{key}")
+            self.audit_tracks = [
+                {"number": str(index), "title": track.get("title") or "Untitled",
+                 "artist": track.get("artist") or "Unknown artist",
+                 "bpm": str(track["bpm"]) if track.get("bpm") is not None else "—",
+                 "danceability": str(track["danceability"]) if track.get("danceability") is not None else "—",
+                 "voice": f'{track["p_voice"]:.0%}' if track.get("p_voice") is not None else "—",
+                 "verdict": track.get("vi_verdict") or "Not analyzed"}
+                for index, track in enumerate(self.audit.get("tracks", []), 1)
+            ]
         except Exception as exc:
             self.message = str(exc)
 
@@ -523,30 +610,57 @@ class UI(rx.State):
 
 
 def nav():
-    links = [("Playlists", "/"), ("Collection", "/stats"), ("Gaps", "/gaps"),
-             ("Admin", "/admin"), ("Synapse", "/synapse"), ("Tests", "/tests"),
-             ("Logs", "/logs"), ("Database", "/db"), ("Playlist audit", "/playlist-audit"),
-             ("Update", "/update"), ("Guide", "/guide")]
+    links = [("Playlists", "/"), ("Collection", "/stats"), ("Gaps", "/gaps")]
+    admin_links = [("settings", "Overview", "/admin"),
+                   ("database", "DB Console", "/db"),
+                   ("search", "Playlist Audit", "/playlist-audit"),
+                   ("flask-conical", "Tests", "/tests"),
+                   ("brain", "Synapse", "/admin#synapse"),
+                   ("logs", "Logs", "/logs"),
+                   ("book-open", "Guide", "/guide"),
+                   ("refresh-cw", "Update", "/update")]
     return rx.box(
         rx.link("MUSICMIND / PLEX", href="/", class_name="nav-brand"),
-        rx.hstack(*[rx.link(label, href=path, class_name="nav-link") for label, path in links
-                    if LASTFM_KEY or path != "/gaps"], class_name="nav-links", wrap="wrap"),
-        rx.box(class_name="nav-balance", aria_hidden="true"),
+        rx.hstack(
+            *[rx.link(label, href=path, class_name="nav-link") for label, path in links
+              if LASTFM_KEY or path != "/gaps"],
+            rx.menu.root(
+                rx.menu.trigger(rx.button(rx.icon("settings", size=16), "Admin", rx.icon("chevron-down", size=14),
+                                          variant="ghost", class_name="nav-admin-trigger")),
+                rx.menu.content(
+                    rx.text("WORKSPACE", class_name="admin-menu-label"),
+                    *[rx.menu.item(rx.icon(icon, size=16), label, on_select=rx.redirect(path))
+                      for icon, label, path in admin_links[:5]],
+                    rx.menu.separator(),
+                    rx.text("SUPPORT & ACTIVITY", class_name="admin-menu-label"),
+                    *[rx.menu.item(rx.icon(icon, size=16), label, on_select=rx.redirect(path))
+                      for icon, label, path in admin_links[5:]],
+                    class_name="nav-admin-menu", align="end", side_offset=8)),
+            class_name="nav-links", wrap="wrap"),
+        rx.el.details(
+            rx.el.summary(rx.icon("palette", size=17), rx.text("Appearance"),
+                          rx.icon("chevron-down", size=14)),
+            rx.box(rx.text("Make it yours", class_name="admin-palette-title"),
+                   theme_selector(), class_name="admin-palette-content"),
+            class_name="admin-palette nav-appearance"),
         class_name="site-nav",
     )
 
 
 def theme_selector():
-    return rx.hstack(
-        *[rx.button(label, on_click=UI.set_theme(name), aria_label=f"{label} theme",
-                    title=f"{label} theme",
-                    class_name=rx.cond(UI.theme == name,
-                        f"theme-swatch swatch-{name} is-selected",
-                        f"theme-swatch swatch-{name}"))
+    return rx.box(
+        *[rx.button(
+            rx.box(rx.box(), rx.box(), rx.box(), class_name=f"palette-preview preview-{name}"),
+            rx.hstack(rx.text(label),
+                      rx.cond(UI.theme == name, rx.icon("check", size=15), rx.fragment()),
+                      justify="between", width="100%"),
+            on_click=UI.set_theme(name), aria_label=f"{label} theme",
+            aria_pressed=UI.theme == name,
+            class_name=rx.cond(UI.theme == name, "palette-option is-selected", "palette-option"))
           for name, label in [("light", "Light"), ("parchment", "Parchment"),
                               ("midnight", "Midnight"), ("ocean", "Ocean"),
                               ("forest", "Forest")]],
-        class_name="theme-switcher", align="center",
+        class_name="palette-options",
     )
 
 
@@ -639,7 +753,7 @@ def home_visual_gallery():
 
 def home_stat(label: str, key: str, detail: str, accent: str):
     return rx.box(rx.text(label, class_name="home-stat-label"),
-                  rx.text(UI.home_stats.get(key, "0"), class_name="home-stat-value"),
+                  rx.text(UI.home_stats_display.get(key, "0"), class_name="home-stat-value"),
                   rx.text(detail, class_name="home-stat-detail"),
                   class_name=f"home-stat {accent}")
 
@@ -953,9 +1067,52 @@ JOB_LABELS = [("fullsync", "Full Sync"), ("ingest", "Sync Plex Library"),
               ("dedup", "Duplicate report"), ("varesolve", "Resolve Various Artists"),
               ("recordingmbid", "Resolve recording IDs"), ("synapse", "Synapse analysis")]
 
+
+def _job_label(name: str) -> str:
+    labels = dict(JOB_LABELS)
+    labels["synapse_full"] = "Synapse audio analysis"
+    labels["synapse_limited"] = "Limited Synapse analysis"
+    labels["synapse_count"] = "Synapse track count"
+    labels["synapse_estimate"] = "Synapse time estimate"
+    return labels.get(name, name.replace("_", " ").title())
+
+
+def synapse_running_indicator():
+    active = UI.running_jobs.contains("synapse_full")
+    return rx.box(
+        rx.cond(
+            active,
+            rx.hstack(rx.icon("activity", size=15), rx.text("Running")),
+            rx.hstack(rx.icon("circle-check", size=15), rx.text("Idle")),
+        ),
+        class_name=rx.cond(active, "synapse-run-indicator is-running", "synapse-run-indicator"),
+        role="status", aria_live="polite",
+    )
+
+
+def fullsync_blocked():
+    return (
+        UI.running_jobs.contains("ingest")
+        | UI.running_jobs.contains("fingerprint")
+        | UI.running_jobs.contains("copyforward")
+        | UI.running_jobs.contains("varesolve")
+        | UI.running_jobs.contains("recordingmbid")
+        | UI.running_jobs.contains("lastfm")
+        | UI.running_jobs.contains("mbenrich")
+        | UI.running_jobs.contains("aienrich")
+        | UI.running_jobs.contains("tagger")
+        | UI.running_jobs.contains("synapse")
+        | UI.running_jobs.contains("synapse_full")
+        | UI.running_jobs.contains("synapse_limited")
+        | UI.running_jobs.contains("group_library")
+        | UI.running_jobs.contains("group_enrichment")
+        | UI.running_jobs.contains("group_analysis")
+        | UI.running_jobs.contains("group_maintenance")
+    )
+
+
 JOB_GROUPS = [
-    ("Library", "Scan Plex and bring your local library index up to date.", [
-        ("fullsync", "Full sync", "Runs the complete library refresh and enrichment pipeline."),
+    ("Library", "Run individual library and listening-history updates.", [
         ("ingest", "Sync Plex library", "Imports Plex's current library into MusicMind's local index."),
         ("lastfm", "Sync Last.fm", "Updates listening history and recent play counts."),
     ]),
@@ -976,6 +1133,38 @@ JOB_GROUPS = [
         ("varesolve", "Resolve Various Artists", "Repairs compilation artist attribution."),
     ]),
 ]
+
+
+def job_status_dialog():
+    return rx.dialog.root(
+        rx.dialog.content(
+            rx.hstack(
+                rx.box(rx.dialog.title(UI.selected_job_label),
+                       rx.text("Live job status and recent output.", class_name="job-dialog-hint"),
+                       class_name="job-dialog-heading"),
+                rx.hstack(
+                    rx.cond(UI.job_running, rx.badge("Running", color_scheme="green"),
+                            rx.badge("Idle")),
+                    rx.cond(UI.job_running,
+                            rx.button("Stop", on_click=UI.stop_job(UI.selected_job), color_scheme="red"),
+                            rx.fragment()),
+                    rx.button("Refresh", on_click=UI.job_load, variant="outline"),
+                    rx.button("Close", on_click=UI.set_job_dialog_open(False), variant="outline"),
+                    class_name="job-dialog-actions"),
+                justify="between", align="start", class_name="job-dialog-header"),
+            rx.cond(UI.selected_job == "fullsync",
+                    rx.box(rx.text(UI.fullsync_phase, class_name="job-dialog-phase"),
+                           rx.progress(value=UI.fullsync_progress, max=100, size="2",
+                                       class_name="fullsync-progress"),
+                           rx.text(UI.fullsync_step.to_string() + " of 12 stages",
+                                   class_name="job-dialog-progress-label"),
+                           class_name="job-dialog-progress"),
+                    rx.fragment()),
+            rx.box(UI.job_log, class_name="job-dialog-log"),
+            class_name="job-dialog-content", size="3"),
+        open=UI.job_dialog_open,
+        on_open_change=UI.set_job_dialog_open
+    )
 
 
 def synapse_network_svg() -> str:
@@ -1020,45 +1209,82 @@ def synapse_network_svg() -> str:
 def admin_page():
     return shell("Back Office", "Run maintenance and follow each job's output.",
                  rx.box(
+                     rx.hstack(
+                         rx.box(rx.text("MUSICMIND / ADMIN", class_name="admin-eyebrow"),
+                                rx.text("A little order in the noise.", class_name="admin-signature")),
+                         justify="between", align="center", class_name="admin-utility-header"),
                      rx.box(
-                         rx.box(rx.text("MUSICMIND  /  SYSTEMS", class_name="art-kicker"),
-                                rx.heading("A little order\nin the noise.", class_name="art-title"),
-                                rx.text("Library tools, tuned and ready.", class_name="art-caption"),
-                                rx.box(*[rx.box(class_name=f"art-bar art-bar-{i}")
-                                         for i in range(1, 13)],
-                                       class_name="art-equalizer", aria_hidden="true"),
-                                rx.box(rx.box(class_name="art-orbit orbit-one"),
-                                       rx.box(class_name="art-orbit orbit-two"),
-                                       rx.box(class_name="art-orbit orbit-three"),
-                                       rx.box(class_name="art-core"),
-                                       class_name="art-orb", aria_hidden="true"),
-                                class_name="admin-art")),
-                     rx.box(rx.text("APPEARANCE", class_name="section-kicker"),
-                            rx.heading("Choose your palette", class_name="appearance-title"),
-                            rx.text("Choose a palette for the app.", class_name="appearance-copy"),
-                            theme_selector(), class_name="appearance-settings"),
-                     class_name="admin-overview"),
-                 rx.box(
-                     panel("Plex server scan",
-                           rx.text("Ask Plex to scan its media folders for new or changed music. This does not update MusicMind's index."),
-                           rx.button("Scan Plex folders", on_click=UI.scan_plex)),
-                     panel("Resync one artist or album",
-                       rx.hstack(rx.input(value=UI.resync_artist, on_change=UI.set_resync_artist,
-                                          placeholder="Artist"),
-                                 rx.input(value=UI.resync_album, on_change=UI.set_resync_album,
-                                          placeholder="Album")),
-                       rx.checkbox("Apply changes", checked=UI.resync_apply,
-                                   on_change=UI.set_resync_apply),
-                       rx.button("Resync", on_click=UI.start_resync),
-                       rx.text("Leave Apply changes unchecked to preview.")),
-                     class_name="admin-grid"),
-                 rx.text("MAINTENANCE", class_name="section-kicker"),
-                 rx.heading("Background jobs", class_name="collection-section-title"),
+                         rx.box(
+                             rx.box(rx.icon("folder-sync", size=22), class_name="admin-tool-icon"),
+                             rx.box(rx.heading("Find new music", size="4"),
+                                    rx.text("Ask Plex to look for new or changed files in your music folders.",
+                                            class_name="admin-tool-copy"),
+                                    rx.text("Then run Full sync below to bring those changes into MusicMind.",
+                                            class_name="admin-tool-note"),
+                                    rx.button("Scan Plex folders", rx.icon("arrow-up-right", size=15),
+                                              on_click=UI.scan_plex, variant="outline"),
+                                    class_name="admin-tool-body"),
+                             class_name="admin-library-tool"),
+                         rx.box(
+                             rx.box(rx.icon("refresh-cw", size=22), class_name="admin-tool-icon"),
+                             rx.box(rx.heading("Refresh a specific release", size="4"),
+                                    rx.text("Recheck one artist or album without refreshing the whole library.",
+                                            class_name="admin-tool-copy"),
+                                    rx.box(
+                                        rx.box(rx.text("Artist", as_="label", html_for="resync-artist"),
+                                               rx.input(id="resync-artist", value=UI.resync_artist,
+                                                        on_change=UI.set_resync_artist, placeholder="Artist name")),
+                                        rx.box(rx.text("Album", as_="label", html_for="resync-album"),
+                                               rx.input(id="resync-album", value=UI.resync_album,
+                                                        on_change=UI.set_resync_album, placeholder="Album title")),
+                                        class_name="admin-resync-fields"),
+                                    rx.hstack(
+                                        rx.checkbox("Apply changes", checked=UI.resync_apply,
+                                                    on_change=UI.set_resync_apply),
+                                        rx.button(rx.cond(UI.resync_apply, "Refresh release", "Preview changes"),
+                                                  on_click=UI.start_resync,
+                                                  disabled=(UI.resync_artist == "") | (UI.resync_album == "")),
+                                        justify="between", align="center", class_name="admin-resync-actions"),
+                                    rx.text("Preview shows what will change before you apply it.",
+                                            class_name="admin-tool-note"),
+                                    class_name="admin-tool-body"),
+                             class_name="admin-library-tool"),
+                         class_name="admin-library-tools"),
+                     class_name="admin-workspace"),
+                 rx.text("LIBRARY OPERATIONS", class_name="section-kicker"),
+                 rx.heading("Keep your collection in tune", class_name="admin-operations-title"),
+                 rx.text("Run the complete pipeline, analyze audio, or choose an individual task below.",
+                         class_name="admin-operations-copy"),
+                 panel("Full sync",
+                       rx.text("Refresh the Plex index, listening history, metadata, tags, and audio analysis.",
+                               class_name="fullsync-description"),
+                       rx.hstack(
+                           rx.cond(UI.running_jobs.contains("fullsync"),
+                                   rx.badge("Running", color_scheme="green"),
+                                   rx.badge("Idle")),
+                           rx.text(UI.fullsync_phase, class_name="fullsync-phase"),
+                           class_name="fullsync-status-row"),
+                       rx.progress(value=UI.fullsync_progress, max=100, size="2",
+                                   class_name="fullsync-progress"),
+                       rx.text(UI.fullsync_step.to_string() + " of 12 stages",
+                               class_name="fullsync-progress-label"),
+                       rx.cond(fullsync_blocked(),
+                               rx.text("Another pipeline job is active. Full sync can start when it finishes.",
+                                       class_name="fullsync-blocked-note"),
+                               rx.fragment()),
+                       rx.hstack(
+                           rx.button("Start full sync", on_click=UI.start_job("fullsync"),
+                                     disabled=UI.running_jobs.contains("fullsync") | fullsync_blocked()),
+                           rx.button("Status", on_click=UI.select_job("fullsync"), variant="outline"),
+                           rx.cond(UI.running_jobs.contains("fullsync"),
+                                   rx.button("Stop", on_click=UI.stop_job("fullsync"), color_scheme="red"),
+                                   rx.fragment()),
+                           class_name="fullsync-actions"),
+                       class_name="panel fullsync-tracker"),
+                 rx.el.div(id="synapse", class_name="admin-section-anchor"),
                  panel("Synapse audio analysis",
                        rx.box(
-                           rx.box(rx.hstack(rx.cond(UI.running_jobs.contains("synapse_full"),
-                                                   rx.badge("Running", color_scheme="green"),
-                                                   rx.badge("Idle")), class_name="synapse-state-row"),
+                           rx.box(synapse_running_indicator(),
                                   rx.text("Measure tempo, key, and vocal features across your tracks.",
                                           class_name="synapse-summary"),
                                   rx.hstack(
@@ -1071,8 +1297,8 @@ def admin_page():
                                       class_name="synapse-metrics"),
                                   rx.hstack(rx.button("Start analysis", on_click=UI.start_job("synapse_full")),
                                             rx.button("Count tracks", on_click=UI.start_job("synapse_count"), variant="outline"),
+                                            rx.button("Status", on_click=UI.select_job("synapse_full"), variant="outline"),
                                             class_name="synapse-admin-actions"),
-                                  rx.link("Detailed status and errors →", href="/synapse", class_name="synapse-detail-link"),
                                   class_name="synapse-admin-main"),
                            rx.box(rx.html(synapse_network_svg()),
                                   class_name=rx.cond(UI.running_jobs.contains("synapse_full") |
@@ -1081,8 +1307,9 @@ def admin_page():
                                   aria_hidden="true"),
                            class_name="synapse-admin-layout"),
                        class_name="panel synapse-admin-panel"),
+                 rx.text("INDIVIDUAL TASKS", class_name="section-kicker admin-tasks-kicker"),
                  rx.box(*[
-                     rx.box(rx.hstack(
+                     rx.el.details(rx.el.summary(rx.hstack(
                                 rx.box(rx.heading(group, size="4", class_name="job-group-title"),
                                        rx.text(description, class_name="job-group-description"),
                                        class_name="job-group-intro"),
@@ -1091,17 +1318,13 @@ def admin_page():
                                             rx.badge("Running", color_scheme="green"),
                                             rx.fragment()),
                                     rx.button("Run all", on_click=UI.start_job(f"group_{group.lower()}"),
-                                              disabled=UI.running_jobs.contains(f"group_{group.lower()}")),
-                                    rx.button(rx.icon("chevron-down", size=18),
-                                              on_click=UI.toggle_job_group(group), variant="outline",
-                                              class_name=rx.cond(UI.open_job_groups.contains(group),
-                                                                 "job-group-toggle is-open", "job-group-toggle"),
-                                              aria_label=rx.cond(UI.open_job_groups.contains(group),
-                                                                 f"Collapse {group} jobs", f"Expand {group} jobs"),
-                                              aria_expanded=UI.open_job_groups.contains(group)),
+                                              disabled=UI.running_jobs.contains(f"group_{group.lower()}") |
+                                              UI.running_jobs.contains("fullsync")),
+                                    rx.box(rx.icon("chevron-down", size=18),
+                                           class_name="job-group-toggle", aria_hidden="true"),
                                     class_name="job-group-controls"),
-                                class_name="job-group-header", justify="between", align="center"),
-                            rx.cond(UI.open_job_groups.contains(group), rx.box(*[
+                                class_name="job-group-header", justify="between", align="center")),
+                            rx.box(*[
                                 rx.box(rx.box(rx.text(label, class_name="job-name"),
                                               rx.text(detail, class_name="job-description"),
                                               class_name="job-copy"),
@@ -1111,44 +1334,18 @@ def admin_page():
                                                             class_name="job-running-badge"),
                                                    rx.badge("Idle", class_name="job-idle-badge")),
                                            rx.button("Run", on_click=UI.start_job(name),
-                                                     disabled=UI.running_jobs.contains(f"group_{group.lower()}")),
-                                           rx.button("Log", on_click=UI.select_job(name), variant="outline"),
+                                                     disabled=UI.running_jobs.contains(f"group_{group.lower()}") |
+                                                     UI.running_jobs.contains("fullsync")),
+                                           rx.button("Status", on_click=UI.select_job(name), variant="outline"),
                                            class_name="job-actions"),
                                        class_name="job-entry")
                                 for name, label, detail in items
                                 if LASTFM_KEY or name != "lastfm"],
-                                  class_name="job-list"), rx.fragment()),
+                                  class_name="job-list", id=f"{group.lower()}-job-list"),
                             class_name="job-group")
                      for group, description, items in JOB_GROUPS],
                      class_name="job-groups"),
-                 panel("Job output", rx.hstack(rx.badge(UI.selected_job),
-                                               rx.cond(UI.job_running, rx.badge("Running", color_scheme="green"),
-                                                       rx.badge("Idle")),
-                                               rx.button("Refresh", on_click=UI.jobs_load),
-                                               rx.cond(UI.job_running, rx.button("Stop job", on_click=UI.stop_job(UI.selected_job), color_scheme="red"), rx.fragment())),
-                       rx.text("Select Log on any job to follow its output here.",
-                               class_name="job-dialog-hint"),
-                       rx.code_block(UI.job_log, language="text")))
-
-
-def synapse_page():
-    return shell("Synapse", "Measure rhythm, key, and voice across your music library.",
-                 panel("Analysis status", rx.code_block(UI.synapse.to_string(), language="json"),
-                       rx.hstack(rx.button("Refresh status", on_click=UI.synapse_load),
-                                 rx.button("Start full analysis", on_click=UI.start_job("synapse_full")),
-                                 rx.button("Load errors", on_click=UI.synapse_errors_load)),
-                       rx.hstack(rx.button("Count files", on_click=UI.start_job("synapse_count")),
-                                 rx.button("Estimate time", on_click=UI.start_job("synapse_estimate"))),
-                       rx.hstack(rx.input(value=UI.synapse_limit, on_change=UI.set_synapse_limit,
-                                          type="number", width="100px"),
-                                 rx.button("Run limited", on_click=UI.start_synapse_limited))),
-                 panel("Errors", rx.foreach(UI.synapse_errors,
-                        lambda item: rx.code_block(item.to_string(), language="json"))),
-                 panel("Full run log", rx.hstack(rx.button("Refresh log", on_click=UI.select_job("synapse_full")),
-                                                  rx.cond(UI.running_jobs.contains("synapse_full"),
-                                                          rx.button("Stop analysis", on_click=UI.stop_job("synapse_full"), color_scheme="red"),
-                                                          rx.fragment())),
-                       rx.code_block(UI.job_log, language="text")))
+                 job_status_dialog())
 
 
 def logs_page():
@@ -1171,11 +1368,32 @@ def query_page():
 
 
 def gaps_page():
-    return shell("Missing from Your Collection", "Artists you played on Last.fm but cannot find in Plex.",
-                 panel("Collection gaps", rx.foreach(UI.gaps, lambda item: rx.hstack(
-                     rx.text(item["artist"]), rx.badge(item["category"]),
-                     rx.text(item["scrobbles"], " plays"),
-                     justify="between", class_name="gap-row"))))
+    return shell("Missing from Your Collection", "Discover what belongs in your library.",
+        rx.box(rx.text("COLLECTION GAPS", class_name="section-kicker"),
+               rx.heading("Worth another listen.", size="7"),
+               rx.text("Artists you’ve played at least 50 times on Last.fm that are missing from your Plex library.",
+                       class_name="gaps-intro-copy"),
+               rx.hstack(rx.badge(UI.gaps.length().to_string() + " missing artists"),
+                         rx.button("Refresh list", on_click=UI.gaps_load, variant="outline"),
+                         align="center", gap="3"), class_name="gaps-intro"),
+        rx.foreach(UI.gap_buckets, lambda bucket:
+            rx.el.details(
+                rx.el.summary(rx.hstack(
+                    rx.box(rx.heading(bucket["label"].to(str), size="4"),
+                           rx.text(bucket["description"].to(str), class_name="gap-category-copy")),
+                    rx.hstack(rx.text(bucket["count"].to_string() + " artists"),
+                              rx.icon("chevron-down", size=18), align="center", gap="3"),
+                    justify="between", align="center")),
+                rx.cond(bucket["count"].to(int) > 0,
+                    rx.box(rx.foreach(bucket["artists"].to(list[dict]), lambda artist:
+                        rx.hstack(rx.text(artist["artist"].to(str)),
+                                  rx.text(artist["scrobbles"].to_string() + " plays", class_name="gap-play-count"),
+                                  justify="between", class_name="gap-artist-row")), class_name="gap-artists"),
+                    rx.text("No missing artists in this category.", class_name="gap-category-copy")),
+                open=bucket["key"] == "worth_acquiring", class_name="gap-category")),
+        rx.cond(UI.gaps.length() == 0,
+            rx.text("No gaps recorded yet. Run Find collection gaps under Admin → Individual tasks → Analysis.",
+                    class_name="gaps-empty"), rx.fragment()))
 
 
 def audit_page():
@@ -1185,10 +1403,24 @@ def audit_page():
                                         placeholder="Playlist key"),
                                rx.button("Inspect", on_click=UI.audit_load)),
                      rx.box(rx.foreach(UI.playlists, lambda p: rx.button(p["title"],
-                         on_click=UI.select_playlist(p["key"].to_string()),
+                         on_click=UI.select_playlist(p["key"].to(str)),
                          variant="outline", class_name="playlist-choice")),
                          class_name="playlist-choices")),
-                 panel("Audit result", rx.code_block(UI.audit.to_string(), language="json")))
+                 rx.cond(UI.audit.contains("title"),
+                     panel("Playlist analysis",
+                         rx.heading(UI.audit.get("title", ""), size="5"),
+                         rx.cond(UI.audit.get("summary", ""),
+                                 rx.text(UI.audit.get("summary", ""), class_name="audit-summary"), rx.fragment()),
+                         rx.text(UI.audit_tracks.length().to_string() + " tracks · — means analysis is unavailable",
+                                 class_name="audit-caption"),
+                         rx.box(rx.table.root(
+                             rx.table.header(rx.table.row(*[rx.table.column_header_cell(label)
+                                 for label in ["#", "Track", "Artist", "BPM", "Danceability", "Voice probability", "Classification"]])),
+                             rx.table.body(rx.foreach(UI.audit_tracks, lambda track: rx.table.row(
+                                 *[rx.table.cell(track[key]) for key in
+                                   ["number", "title", "artist", "bpm", "danceability", "voice", "verdict"]]))),
+                             width="100%"), class_name="audit-table")),
+                     rx.text("Select a playlist to inspect its tracks and audio analysis.", class_name="audit-caption")))
 
 
 def update_page():
@@ -1307,8 +1539,8 @@ app = rx.App(
 for page, route, on_load in [
     (home, "/", UI.home_load),
     (stats_page, "/stats", UI.stats_load),
-    (admin_page, "/admin", UI.jobs_load),
-    (synapse_page, "/synapse", UI.jobs_load),
+    (admin_page, "/admin", UI.admin_load),
+    (lambda: rx.fragment(), "/synapse", rx.redirect("/admin")),
     (logs_page, "/logs", UI.logs_load),
     (query_page, "/db", None),
     (gaps_page, "/gaps", UI.gaps_load),

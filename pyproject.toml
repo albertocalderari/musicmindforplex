@@ -19,7 +19,6 @@ dependencies = [
     "pycountry",
     "reflex>=0.11,<0.12",
     "fastapi>=0.164.0",
-    "essentia-tensorflow>=2.1b6.dev1438",
 ]
 
 [project.scripts]
@@ -28,7 +27,7 @@ musicmind = "musicmind_cli.cli:main"
 [project.optional-dependencies]
 slim = ["essentia"]
 full = [
-    "essentia-tensorflow",
+    "essentia-tensorflow>=2.1b6.dev1438",
     "numpy",
 ]
 

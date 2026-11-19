@@ -39,11 +39,31 @@ TEST_COMMANDS = {
     "ai_limited_run": ("enrich_artists.py", ["--limit", "1"]),
 }
 GROUP_COMMANDS = {
-    "group_library": ("fullsync", "ingest", "lastfm"),
+    "group_library": ("ingest", "lastfm"),
     "group_enrichment": ("mbenrich", "aienrich", "tagger", "context", "recordingmbid"),
     "group_analysis": ("gaps", "fingerprint", "copyforward"),
     "group_maintenance": ("dedup", "varesolve"),
 }
+FULLSYNC_CHILD_JOBS = {
+    "ingest", "fingerprint", "copyforward", "varesolve", "recordingmbid",
+    "lastfm", "mbenrich", "aienrich", "tagger", "synapse", "synapse_full",
+    "synapse_limited",
+}
+
+FULLSYNC_PHASES = [
+    ("plex_scan", "🔍 Triggering Plex library scan...", "Scanning Plex library"),
+    ("ingest", "🔄 Syncing Plex Library...", "Syncing Plex library"),
+    ("fingerprint", "🔗 Fingerprinting new tracks...", "Fingerprinting new tracks"),
+    ("copy_forward", "♻️ Checking for known duplicates...", "Copying prior analysis"),
+    ("va_resolve", "🎭 Resolving Various Artists tracks...", "Resolving compilation artists"),
+    ("enrich_compilations", "🏷️ Enriching compilations (ID3 fallback)...", "Enriching compilations"),
+    ("recording_mbids", "🎼 Resolving recording IDs...", "Resolving recording IDs"),
+    ("lastfm", "🎵 Syncing Last.fm...", "Syncing Last.fm"),
+    ("mb_enrich", "🔍 Enriching artists (MusicBrainz)...", "Enriching artists with MusicBrainz"),
+    ("ai_enrich", "🤖 Enriching artists (AI fallback)...", "Enriching artists with AI"),
+    ("tag_tracks", "🏷️ Tagging new tracks...", "Tagging tracks"),
+    ("synapse", "🧠 Analyzing audio (Synapse: BPM/key/danceability)...", "Analyzing audio"),
+]
 
 
 def group_tasks(name: str) -> tuple[str, ...]:
@@ -74,6 +94,20 @@ def _alive(pid: int) -> bool:
         return False
 
 
+def _tail_log(path: Path, limit: int = 120) -> list[str]:
+    """Read only the end of a potentially long running job log."""
+    with path.open("rb") as f:
+        f.seek(0, os.SEEK_END)
+        position = f.tell()
+        chunk = b""
+        while position > 0 and chunk.count(b"\n") <= limit:
+            size = min(8192, position)
+            position -= size
+            f.seek(position)
+            chunk = f.read(size) + chunk
+    return chunk.decode("utf-8", errors="replace").splitlines(keepends=True)[-limit:]
+
+
 def status(name: str) -> dict:
     meta_path, log_path = _paths(name)
     if name == "fullsync":
@@ -84,13 +118,36 @@ def status(name: str) -> dict:
         meta = {}
     pid = int(meta.get("pid", 0))
     try:
-        with log_path.open(errors="replace") as f:
-            lines = f.readlines()[-120:]
+        lines = _tail_log(log_path)
     except OSError:
         lines = []
-    return {"name": name, "running": bool(pid and not meta.get("finished") and _alive(pid)),
-            "exit_code": meta.get("exit_code"), "stopped": meta.get("stopped", False),
-            "log": "".join(lines)}
+    result = {"name": name, "running": bool(pid and not meta.get("finished") and _alive(pid)),
+              "exit_code": meta.get("exit_code"), "stopped": meta.get("stopped", False),
+              "log": "".join(lines)}
+    if name == "fullsync":
+        try:
+            progress_state = json.loads((JOB_DIR / "fullsync_progress.json").read_text())
+        except (OSError, ValueError):
+            progress_state = {}
+        if progress_state:
+            active = progress_state.get("active", [])
+            stage_labels = {stage_id: label for stage_id, _, label in FULLSYNC_PHASES}
+            if len(active) > 1:
+                phase = f"{len(active)} stages running in parallel"
+            elif active:
+                phase = stage_labels.get(active[-1], progress_state.get("phase", "Running"))
+            else:
+                phase = progress_state.get("phase", "Waiting to start")
+            if result["stopped"]:
+                phase = f"Stopped · {phase}"
+            elif not result["running"] and not progress_state.get("finished"):
+                phase = f"Interrupted · {phase}"
+            result.update(phase=phase,
+                          progress=progress_state.get("progress", 0),
+                          step=progress_state.get("step", 0))
+        else:
+            result.update(phase="Waiting to start", progress=0, step=0)
+    return result
 
 
 def stop(name: str) -> dict:
@@ -120,6 +177,19 @@ def start(name: str, args: list[str] | None = None) -> dict:
     current = status(name)
     if current["running"]:
         raise ValueError(f"{name} is already running")
+    fullsync_running = status("fullsync")["running"] if name != "fullsync" else False
+    requested_jobs = group_tasks(name) if name in GROUP_COMMANDS else (name,)
+    overlap = set(requested_jobs) & FULLSYNC_CHILD_JOBS
+    if name == "fullsync":
+        active = {job for job in FULLSYNC_CHILD_JOBS if status(job)["running"]}
+        active.update(
+            group for group in GROUP_COMMANDS
+            if set(group_tasks(group)) & FULLSYNC_CHILD_JOBS and status(group)["running"]
+        )
+        if active:
+            raise ValueError(f"Cannot start full sync while {', '.join(sorted(active))} is running")
+    elif fullsync_running and overlap:
+        raise ValueError(f"Cannot start {name} while full sync is running")
     if name in GROUP_COMMANDS:
         active = [task for task in group_tasks(name) if status(task)["running"]]
         if active:
@@ -139,6 +209,11 @@ def start(name: str, args: list[str] | None = None) -> dict:
     elif args:
         raise ValueError("Unexpected job arguments")
     command = [sys.executable, "-u", "-m", "musicmind_ui.jobs", "run", name, *args]
+    if name == "fullsync":
+        (JOB_DIR / "fullsync_progress.json").write_text(json.dumps({
+            "phase": "Starting Plex scan", "step": 0, "progress": 0,
+            "total": len(FULLSYNC_PHASES), "finished": False, "active": [],
+        }))
     with log_path.open("w") as log:
         proc = subprocess.Popen(
             command,
