@@ -34,3 +34,6 @@ models/
 *.bak-*
 *.bak*
 /.coverage
+/.states/
+/.web/
+/job_logs/

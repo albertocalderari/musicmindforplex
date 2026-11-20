@@ -12,11 +12,13 @@ install: init
 	uv sync --all-extras
 	uv lock
 
-install-full: install
+run-legacy: install
+	@test -f config.py || { echo "config.py missing. Copy config.example.py to config.py and fill in your credentials."; exit 1; }
+	uv run --no-sync python -m web.app
 
 run: install
 	@test -f config.py || { echo "config.py missing. Copy config.example.py to config.py and fill in your credentials."; exit 1; }
-	uv run --no-sync python -m web.app
+	uv run --no-sync musicmind serve
 
 test: install
 	uv run --no-sync coverage run
