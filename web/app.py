@@ -2312,8 +2312,20 @@ def stats_data():
         ).fetchall()
         genre_source = "plex"
 
+    # Metadata describes current collection artists, including artists with no
+    # enrichment row. Old artist_meta entries must not inflate the collection.
+    collection_artists = """
+        WITH collection_artists AS (
+            SELECT DISTINCT COALESCE(NULLIF(real_artist, ''), artist) AS artist
+            FROM tracks WHERE COALESCE(NULLIF(real_artist, ''), artist) IS NOT NULL
+              AND TRIM(COALESCE(NULLIF(real_artist, ''), artist)) != ''
+        ), collection_metadata AS (
+            SELECT a.artist, m.era, m.country, m.gender
+            FROM collection_artists a LEFT JOIN artist_meta m ON m.artist = a.artist
+        )
+    """
     by_era = conn.execute(
-        "SELECT era, COUNT(*) as cnt FROM artist_meta WHERE era != 'unknown' AND era IS NOT NULL GROUP BY era"
+        collection_artists + "SELECT era, COUNT(*) as cnt FROM collection_metadata WHERE era != 'unknown' AND era IS NOT NULL GROUP BY era"
     ).fetchall()
     def decade_sort(row):
         match = re.match(r"\d+", row[0] or "")
@@ -2332,16 +2344,16 @@ def stats_data():
     # country). Canonicalization + LIMIT happens below, same pattern
     # as the /countries endpoint.
     by_country_raw = conn.execute(
-        "SELECT country, COUNT(*) as cnt FROM artist_meta WHERE country != 'unknown' AND country IS NOT NULL GROUP BY country"
+        collection_artists + "SELECT country, COUNT(*) as cnt FROM collection_metadata WHERE country != 'unknown' AND country IS NOT NULL GROUP BY country"
     ).fetchall()
 
     by_gender = conn.execute(
-        "SELECT gender, COUNT(*) as cnt FROM artist_meta WHERE gender IS NOT NULL GROUP BY gender ORDER BY cnt DESC"
+        collection_artists + "SELECT COALESCE(NULLIF(TRIM(gender), ''), 'Unclassified') AS category, COUNT(*) as cnt FROM collection_metadata GROUP BY category ORDER BY cnt DESC, category"
     ).fetchall()
 
     total_tracks = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
     total_artists = conn.execute(
-        "SELECT COUNT(DISTINCT COALESCE(real_artist, artist)) FROM tracks WHERE artist IS NOT NULL AND artist != ''"
+        collection_artists + "SELECT COUNT(*) FROM collection_artists"
     ).fetchone()[0]
     total_scrobbles = conn.execute("SELECT COUNT(*) FROM lastfm_scrobbles").fetchone()[
         0

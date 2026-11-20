@@ -615,3 +615,63 @@ body:has(.theme-forest) .nav-admin-menu { --menu-bg: #fafcf7; --menu-ink: #27332
 .nav-admin-menu.rt-DropdownMenuContent { width: 14rem; min-width: 14rem; max-width: calc(100vw - 2rem); height: auto !important; min-height: 0 !important; max-height: min(26rem, var(--radix-dropdown-menu-content-available-height, calc(100dvh - 5rem))); overflow-y: auto; overflow-x: hidden; }
 .nav-admin-menu .rt-ScrollAreaViewport { height: auto !important; min-height: 0 !important; max-height: min(25rem, calc(100dvh - 6rem)); }
 .nav-admin-menu .rt-DropdownMenuItem { height: 2.15rem; min-height: 2.15rem; padding: .35rem .65rem; flex: 0 0 auto; }
+
+/* The Collection: source-led, readable at every result limit. */
+.collection-page { --collection-listening: #a05232; --collection-composition: #486b58; --collection-grid: var(--hairline); font-size: 1rem; line-height: 1.5; }
+.theme-midnight .collection-page { --collection-listening: #efab87; --collection-composition: #a1c8ad; }
+.app-shell:has(.collection-page) { max-width: 1264px; padding-inline: 32px; }
+.collection-page :is(h1,h2,p) { overflow-wrap: anywhere; }
+.collection-header { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 24px; padding-block: 24px; border-bottom: 1px solid var(--hairline); }
+.collection-title { margin: 8px 0 12px; font-family: "New York", Georgia, serif; font-size: clamp(2rem, 3.2vw, 2.75rem); font-weight: 500; line-height: 1.15; letter-spacing: 0; text-wrap: balance; }
+.collection-page .section-kicker { color: var(--accent); font-size: .8125rem; letter-spacing: .1em; font-weight: 700; }
+.collection-note { color: var(--muted); font-size: .875rem; line-height: 1.6; max-width: 70ch; }
+.collection-export { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; color: var(--ink); font-size: .875rem; text-underline-offset: 4px; }
+.collection-page .collection-section { margin-top: 48px; }
+.collection-page .collection-metrics { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 24px; margin-block: 16px; }
+.collection-page .metric-card { min-height: 0; padding: 0 0 16px; border: 0; border-bottom: 1px solid var(--hairline); border-radius: 0; background: transparent; box-shadow: none; }
+.collection-page .metric-label { color: var(--muted) !important; font-size: 1rem; }
+.collection-page .metric-value { color: var(--ink) !important; font-size: clamp(2.25rem,5vw,3.5rem); font-weight: 500; margin-block: 8px !important; overflow-wrap: anywhere; }
+.collection-page .collection-charts { gap: 24px; margin-top: 16px; align-items: start; }
+.collection-page .collection-chart { padding: 24px; border-radius: 12px; background: var(--surface); box-shadow: none; }
+.collection-panel-heading { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+.collection-panel-heading > div:first-child { flex: 1 1 180px; }
+.collection-page .chart-title { font-size: 1.5rem; line-height: 1.2; letter-spacing: 0; font-weight: 500; }
+.collection-page .chart-caption { font-size: .875rem; line-height: 1.5; }
+.collection-result-control { display: flex; flex-direction: column; gap: 4px; font-size: .8125rem; color: var(--muted); }
+.collection-ranking { list-style: none; padding: 0; margin: 0; }
+.collection-ranking li { display: grid; grid-template-columns: 2ch minmax(0,1fr) max-content; gap: 12px; align-items: baseline; padding-block: 12px; border-bottom: 1px solid var(--hairline); }
+.collection-rank { color: var(--muted); font-size: .8125rem; }
+.collection-row-name { overflow-wrap: anywhere; }
+.collection-count { font-variant-numeric: tabular-nums; text-align: right; font-size: .9375rem; }
+.collection-row-bar { margin-top: 8px; height: 3px; }
+.collection-row-bar > div { height: 100%; background: var(--collection-composition); border-radius: 2px; }
+.collection-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+.collection-pagination p { font-size: .8125rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.collection-page button, .collection-page summary { min-height: 44px; }
+.collection-page button { white-space: normal; }
+.collection-page :is(button,a,summary,[role="combobox"]):focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.collection-disclosure { margin-top: 24px; border-top: 1px solid var(--hairline); }
+.collection-disclosure > summary { padding-block: 12px; cursor: pointer; color: var(--ink); font-size: .9375rem; }
+.collection-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: .875rem; }
+.collection-table caption { text-align: left; color: var(--muted); padding-block: 12px; }
+.collection-table :is(th,td) { text-align: left; vertical-align: top; overflow-wrap: anywhere; padding: 12px 8px 12px 0; border-bottom: 1px solid var(--hairline); }
+.collection-table tbody th { font-weight: 400; }
+.collection-table :is(th,td):last-child { text-align: right; }
+.collection-page .recharts-cartesian-axis-tick-value { fill: var(--muted); font-size: .8125rem; }
+.collection-page .recharts-default-tooltip { background: var(--surface) !important; border-color: var(--hairline) !important; color: var(--ink) !important; font-size: .875rem; }
+.collection-empty { min-height: 120px; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 12px; color: var(--muted); }
+.collection-empty a { color: var(--accent); }
+.collection-status { color: var(--muted); font-size: .875rem; margin-top: 16px; }
+.collection-status:empty { margin: 0; }
+.collection-status button { margin-top: 8px; }
+.collection-skeleton { height: 220px; border-radius: 12px; background: color-mix(in srgb,var(--muted) 12%,var(--surface)); }
+.collection-skeletons { display: grid; gap: 24px; margin-top: 32px; }
+@media (max-width: 1023px) { .collection-page .collection-charts { grid-template-columns: 1fr; } }
+@media (max-width: 767px) {
+  .app-shell:has(.collection-page) { padding-inline: 16px; }
+  .collection-page .collection-chart { padding: 16px; }
+  .collection-page .collection-section { margin-top: 40px; }
+  .collection-title { font-size: 2rem; }
+}
+@media (max-width: 379px) { .collection-page .collection-metrics { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .collection-page *, .collection-page *::before, .collection-page *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

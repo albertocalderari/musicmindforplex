@@ -13,5 +13,5 @@ from .components import (
     track_row,
 )
 from .home import home, home_art, home_stat, home_visual_gallery
-from .stats import horizontal_chart, stats_chart, stats_limit, stats_metric, stats_page, vertical_chart
+from .stats import stats_page
 from .tools import audit_page, gaps_page, guide_page, logs_page, query_page, tests_page, update_page

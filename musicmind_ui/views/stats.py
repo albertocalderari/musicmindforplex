@@ -1,154 +1,169 @@
-"""Collection statistics page and chart components."""
-
+"""The Collection: source-labelled statistics with accessible data alternatives."""
 import reflex as rx
+from reflex_components_core.base.error_boundary import ErrorBoundary
 from musicmind_ui.state import UI
-from .components import panel, shell
+from .components import shell
 
 
-def horizontal_chart(data, name_key: str, value_key: str, color: str = "#80532f"):
-    return rx.recharts.bar_chart(
-        rx.recharts.cartesian_grid(stroke="#ebe6dd", horizontal=False),
-        rx.recharts.x_axis(type_="number", tick_line=False, axis_line=False),
-        rx.recharts.y_axis(data_key=name_key, type_="category", width=135,
-                           tick_line=False, axis_line=False),
-        rx.recharts.graphing_tooltip(),
-        rx.recharts.bar(data_key=value_key, fill=color, radius=[0, 6, 6, 0],
-                        is_animation_active=True, animation_duration=900),
-        data=data, layout="vertical", width="100%", height=320,
-        margin={"top": 8, "right": 18, "bottom": 8, "left": 6},
-    )
+def chart_frame(chart):
+    # A chart failure must not remove the independently rendered data table.
+    return ErrorBoundary.create(
+        rx.box(chart, aria_hidden=True),
+        fallback_render=rx.Var.create(rx.text(
+            "Chart unavailable. Exact values remain available in View data below.",
+            role="status", class_name="collection-note")))
 
 
-def vertical_chart(data, name_key: str, value_key: str, color: str = "#80532f"):
-    return rx.recharts.bar_chart(
-        rx.recharts.cartesian_grid(stroke="#ebe6dd", vertical=False),
-        rx.recharts.x_axis(data_key=name_key, tick_line=False, axis_line=False),
-        rx.recharts.y_axis(tick_line=False, axis_line=False),
-        rx.recharts.graphing_tooltip(),
-        rx.recharts.bar(data_key=value_key, fill=color, radius=[6, 6, 0, 0],
-                        is_animation_active=True, animation_duration=900),
-        data=data, width="100%", height=280,
-        margin={"top": 8, "right": 12, "bottom": 8, "left": 4},
-    )
+def tooltip():
+    return rx.recharts.graphing_tooltip(
+        is_animation_active=False,
+        custom_attrs={"formatter": rx.Var(
+            _js_expr="(value, name) => [Number(value).toLocaleString(), name]")})
 
 
-def stats_metric(label: str, key: str, detail: str, accent: str):
-    return rx.box(
-        rx.text(label, class_name="metric-label"),
-        rx.heading(UI.stats_display[key], class_name="metric-value"),
-        rx.text(detail, class_name="metric-detail"),
-        class_name=f"metric-card {accent}",
-    )
+def empty(message: str, action: str = "Manage library and enrichment"):
+    return rx.box(rx.text(message), rx.link(action, href="/admin"), class_name="collection-empty")
 
 
-def stats_chart(title: str, caption: str, chart, *, control=None, class_name: str = ""):
-    return rx.box(
-        rx.hstack(
-            rx.box(rx.heading(title, class_name="chart-title"),
-                   rx.text(caption, class_name="chart-caption")),
-            control if control is not None else rx.box(),
-            justify="between", align="start", class_name="chart-heading",
-        ),
-        chart,
-        class_name=f"collection-chart {class_name}",
-    )
+def data_table(rows, label: str, *, timeline=False):
+    return rx.el.table(
+        rx.el.caption(label),
+        rx.el.thead(rx.el.tr(rx.el.th("Period" if timeline else "Category", scope="col"),
+                              rx.el.th("Recorded plays" if timeline else "Artists", scope="col"))),
+        rx.el.tbody(rx.foreach(rows, lambda row: rx.el.tr(
+            rx.el.th(row["label"] if timeline else row["name"], scope="row"),
+            rx.el.td(row["display"] if timeline else row["count"])))),
+        class_name="collection-table")
 
 
-def stats_limit(kind: str):
-    state_value = {"artist": UI.artist_limit, "genre": UI.genre_limit,
-                   "country": UI.country_limit}[kind]
-    return rx.select(["10", "25", "50", "100"], value=state_value,
-                     on_change=lambda value: UI.set_stats_limit(kind, value),
-                     aria_label=f"Number of {kind} results", class_name="stats-limit")
+def disclosure(title: str, *children):
+    return rx.el.details(rx.el.summary(title), *children, class_name="collection-disclosure")
+
+
+def heading(title: str, caption, control=None):
+    return rx.box(rx.box(rx.heading(title, as_="h2", class_name="chart-title"),
+                         rx.text(caption, class_name="chart-caption")),
+                  control if control is not None else rx.fragment(), class_name="collection-panel-heading")
+
+
+def ranked_list(kind: str, title: str, caption):
+    value = {"artist": UI.artist_limit, "genre": UI.genre_limit, "country": UI.country_limit}[kind]
+    label = {"artist": "Artist", "genre": "Genre", "country": "Country"}[kind] + " results"
+    rows = UI.stats_visible[kind]
+    return rx.el.section(
+        heading(title, caption,
+                rx.box(rx.el.label(label, html_for=f"{kind}-limit"),
+                       rx.select(["10", "25", "50", "100"], value=value, id=f"{kind}-limit",
+                                 aria_label=label, on_change=lambda v: UI.set_stats_limit(kind, v)),
+                       class_name="collection-result-control")),
+        rx.cond(UI.stats_rankings[kind].length() > 0,
+            rx.fragment(
+                rx.el.ol(rx.foreach(rows, lambda row: rx.el.li(
+                    rx.text(row["rank"], class_name="collection-rank", aria_hidden=True),
+                    rx.box(rx.text(row["name"], class_name="collection-row-name"),
+                           rx.box(rx.box(style={"width": row["width"]}),
+                                  class_name="collection-row-bar", aria_hidden=True)),
+                    rx.text(row["count"], class_name="collection-count"))),
+                    start=UI.stats_pages[kind] * 10 + 1, role="list", class_name="collection-ranking"),
+                rx.el.nav(
+                    rx.button("Previous", on_click=UI.stats_turn_page(kind, -1),
+                              disabled=UI.stats_pages[kind] == 0, variant="outline"),
+                    rx.text(UI.stats_ranges[kind], aria_live="polite"),
+                    rx.button("Next", on_click=UI.stats_turn_page(kind, 1),
+                              disabled=(UI.stats_pages[kind] + 1) * 10 >= UI.stats_rankings[kind].length(),
+                              variant="outline"),
+                    aria_label=f"{title} pages", class_name="collection-pagination")),
+            empty("No recorded plays yet." if kind == "artist" else "No metadata available yet.")),
+        class_name="collection-chart collection-ranked")
+
+
+def overview():
+    def metric(label, key):
+        return rx.box(rx.text(label, class_name="metric-label"),
+                      rx.text(UI.stats_display[key], class_name="metric-value"), class_name="metric-card")
+    return rx.el.section(
+        rx.text("LIBRARY OVERVIEW · PLEX", class_name="section-kicker"),
+        rx.box(metric("Tracks", "total_tracks"), metric("Artists", "total_artists"),
+               class_name="collection-metrics"),
+        rx.text("Instrumental tracks: ", UI.stats_display["total_instrumental"],
+                " · Based on available metadata", class_name="collection-note"),
+        rx.cond(UI.stats_summary["total_tracks"] == 0, empty("No tracks found.", "Set up or sync your library")),
+        class_name="collection-section")
+
+
+def listening():
+    return rx.el.section(
+        rx.text("LISTENING · LAST.FM", class_name="section-kicker"),
+        rx.box(heading("Your listening over time", "Recorded plays: " + UI.stats_display["total_scrobbles"]),
+            rx.cond(UI.listening_rows.length() > 0,
+                rx.fragment(
+                    chart_frame(rx.recharts.line_chart(
+                        rx.recharts.cartesian_grid(stroke="var(--collection-grid)", vertical=False),
+                        rx.recharts.x_axis(data_key="label", min_tick_gap=42, tick_line=False,
+                                           stroke="var(--muted)"),
+                        rx.recharts.y_axis(allow_decimals=False, domain=[0, "auto"], width=55,
+                                           stroke="var(--muted)"),
+                        tooltip(),
+                        rx.recharts.line(data_key="plays", name="Recorded plays", type_="linear",
+                                         stroke="var(--collection-listening)", stroke_width=3,
+                                         connect_nulls=False, is_animation_active=False, dot=True),
+                        data=UI.listening_rows, width="100%", height=280,
+                        margin={"top": 12, "right": 16, "bottom": 8, "left": 0})),
+                    rx.text("Recorded plays · Gaps mean no recorded data; sync coverage is unknown. Periods use the server’s local time.",
+                            class_name="collection-note"),
+                    disclosure("View listening data", data_table(UI.listening_rows, "Last.fm recorded listening", timeline=True))),
+                empty("No listening history yet.", "Sync Last.fm in Admin")),
+            class_name="collection-chart collection-listening"), class_name="collection-section")
+
+
+def decades():
+    return rx.el.section(
+        heading("Across the decades", "Current library artists by enriched era; unknown eras excluded"),
+        rx.cond(UI.by_era.length() > 0,
+            rx.fragment(
+                chart_frame(rx.recharts.bar_chart(
+                    rx.recharts.cartesian_grid(stroke="var(--collection-grid)", vertical=False),
+                    rx.recharts.x_axis(data_key="era", min_tick_gap=24, stroke="var(--muted)"),
+                    rx.recharts.y_axis(allow_decimals=False, domain=[0, "auto"], width=45, stroke="var(--muted)"),
+                    tooltip(),
+                    rx.recharts.bar(data_key="cnt", name="Artists", fill="var(--collection-composition)",
+                                    is_animation_active=False, radius=[4, 4, 0, 0]),
+                    data=UI.by_era, width="100%", height=280)),
+                disclosure("View decade data", data_table(UI.era_rows, "Artists by enriched era"))),
+            empty("No era metadata available yet.")), class_name="collection-chart")
 
 
 def stats_page():
-    return shell("The Collection", "A closer look at the music you keep and play.",
-        rx.hstack(
-            rx.box(rx.text("YOUR LIBRARY", class_name="section-kicker"),
-                   rx.heading("In the stacks", class_name="collection-section-title"),
-                   rx.text("An overview of your Plex library and Last.fm listening history.",
-                           class_name="section-description")),
-            rx.link("Export library CSV ↗", href="/export-csv", class_name="export-link"),
-            justify="between", align="end", class_name="collection-intro",
-        ),
-        rx.box(
-            stats_metric("Tracks", "total_tracks", "Songs in your Plex library", "metric-brown"),
-            stats_metric("Artists", "total_artists", "Distinct artists to explore", "metric-sage"),
-            stats_metric("Scrobbles", "total_scrobbles", "Plays recorded by Last.fm", "metric-terracotta"),
-            stats_metric("Instrumentals", "total_instrumental", "Tracks without vocals", "metric-plum"),
-            class_name="collection-metrics",
-        ),
-        rx.box(
-            rx.text("LISTENING", class_name="section-kicker"),
-            stats_chart("Your listening over time",
-                rx.cond(UI.listening_granularity == "month", "Scrobbles by month", "Scrobbles by year"),
-                rx.cond(UI.listening_by_year.length() > 0,
-                    rx.recharts.line_chart(
-                        rx.recharts.cartesian_grid(stroke="#e8e4db", vertical=False),
-                        rx.recharts.x_axis(data_key=UI.listening_granularity, tick_line=False, axis_line=False),
-                        rx.recharts.y_axis(tick_line=False, axis_line=False),
-                        rx.recharts.graphing_tooltip(),
-                        rx.recharts.line(data_key="plays", stroke="#80532f", stroke_width=3,
-                                         type_="monotone", dot=True,
-                                         is_animation_active=True, animation_duration=900),
-                        data=rx.cond(UI.listening_granularity == "month",
-                                     UI.listening_by_month, UI.listening_by_year),
-                        width="100%", height=300,
-                        margin={"top": 12, "right": 18, "bottom": 4, "left": -18}),
-                    rx.box(rx.text("No listening history yet."),
-                           rx.text("Sync Last.fm from Admin to see your plays by year.",
-                                   class_name="empty-hint"), class_name="empty-chart")),
-                class_name="chart-feature"),
-            class_name="collection-section",
-        ),
-        rx.box(
-            rx.text("DISCOVER", class_name="section-kicker"),
-            rx.heading("What makes up your collection", class_name="collection-section-title"),
+    return shell("The Collection", "Your music, in perspective.",
+        rx.el.main(
+            rx.el.header(
+                rx.box(rx.text("THE COLLECTION", class_name="section-kicker"),
+                       rx.heading("Your music, in perspective.", as_="h1", class_name="collection-title"),
+                       rx.text("Plex library and Last.fm listening history.", class_name="collection-note")),
+                rx.link(rx.icon("download", size=16), "Export library CSV", href="/export-csv",
+                        download=True, class_name="collection-export"), class_name="collection-header"),
             rx.box(
-                stats_chart("Most played artists", "Artists by Plex play count",
-                    rx.cond(UI.top_artists.length() > 0,
-                        horizontal_chart(UI.top_artists, "artist", "plays"),
-                        rx.text("Play counts will appear after a library sync.", class_name="empty-chart")),
-                    control=stats_limit("artist")),
-                stats_chart("Where the music comes from", "Artist origins in your library",
-                    rx.cond(UI.by_country.length() > 0,
-                        horizontal_chart(UI.by_country, "country", "cnt", "#567264"),
-                        rx.text("Country data will appear after enrichment.", class_name="empty-chart")),
-                    control=stats_limit("country")),
-                stats_chart("Genres",
-                    rx.cond(UI.genre_source == "plex", "Genres from Plex library metadata",
-                            "Enriched tags across your tracks"),
-                    rx.cond(UI.top_genres.length() > 0,
-                        horizontal_chart(UI.top_genres, "tag", "cnt", "#927082"),
-                        rx.box(rx.text("No tagged genres yet."),
-                               rx.link("Run the tagger in Admin →", href="/admin"),
-                               class_name="empty-chart")),
-                    control=stats_limit("genre")),
-                stats_chart("Across the decades", "Artists by era",
-                    rx.cond(UI.by_era.length() > 0,
-                        vertical_chart(UI.by_era, "era", "cnt", "#b47b46"),
-                        rx.text("Era data will appear after enrichment.", class_name="empty-chart"))),
-                stats_chart("Artist gender", "Metadata for artists in your library",
-                    rx.cond(UI.by_gender.length() > 0,
-                        rx.recharts.pie_chart(
-                            rx.recharts.graphing_tooltip(),
-                            rx.recharts.pie(
-                                rx.foreach(UI.by_gender,
-                                    lambda item, index: rx.recharts.cell(
-                                        fill=rx.match(index, (0, "#80532f"),
-                                                      (1, "#567264"),
-                                                      (2, "#a56643"),
-                                                      "#927082"))),
-                                data=UI.by_gender, data_key="cnt", name_key="gender",
-                                cx="50%", cy="46%", outer_radius=88, label=True,
-                                is_animation_active=True, animation_duration=1000),
-                            rx.recharts.legend(),
-                            width="100%", height=300, class_name="gender-chart"),
-                        rx.text("Gender data will appear after enrichment.", class_name="empty-chart"))),
-                class_name="collection-charts",
-            ), class_name="collection-section",
-        ),
-    )
-
-
+                rx.cond(UI.stats_loading, rx.text(rx.cond(UI.stats_loaded, "Refreshing collection…", "Loading collection…"))),
+                rx.cond(UI.stats_error != "", rx.box(
+                    rx.text(rx.cond(UI.stats_loaded, "Showing previous data. ", ""), UI.stats_error),
+                    rx.button("Retry", on_click=UI.stats_load, disabled=UI.stats_loading))),
+                role="status", aria_live="polite", class_name="collection-status"),
+            rx.cond(UI.stats_loaded,
+                rx.fragment(overview(), listening(),
+                    rx.el.section(
+                        rx.text("IN YOUR LIBRARY", class_name="section-kicker"),
+                        rx.box(
+                            ranked_list("artist", "Most played artists", "Library track play counts · Plex and imported history"),
+                            ranked_list("genre", "Genres", rx.cond(UI.genre_source == "plex",
+                                "Tracks by Plex genre field; stored combinations are kept together",
+                                "Enriched track-tag assignments; tags may overlap")),
+                            ranked_list("country", "Artist origins", "Current library artists by enriched country; unknowns excluded"),
+                            decades(), class_name="collection-charts"), class_name="collection-section"),
+                    disclosure("Artist metadata", rx.text("Gender categories from enrichment for current library artists. Missing values are unclassified.",
+                               class_name="collection-note"),
+                               rx.cond(UI.gender_rows.length() > 0,
+                                       data_table(UI.gender_rows, "Artist gender metadata"), empty("No artist metadata yet.")))),
+                rx.cond(UI.stats_loading, rx.box(
+                    *[rx.box(class_name="collection-skeleton") for _ in range(3)],
+                    aria_label="Loading collection data", class_name="collection-skeletons"))),
+            aria_busy=UI.stats_loading, class_name="collection-page"))

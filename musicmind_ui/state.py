@@ -7,6 +7,7 @@ import sqlite3
 import reflex as rx
 from musicmind.paths import PROJECT_ROOT
 from musicmind_ui import jobs
+from musicmind_ui.collection import ranked_rows, timeline_rows
 from musicmind_ui.job_definitions import JOB_GROUPS
 
 try:
@@ -130,6 +131,33 @@ class UI(rx.State):
                                      "total_scrobbles": 0, "total_instrumental": 0}
     stats_display: dict[str, str] = {"total_tracks": "0", "total_artists": "0",
                                      "total_scrobbles": "0", "total_instrumental": "0"}
+    stats_loading: bool = False
+    stats_loaded: bool = False
+    stats_error: str = ""
+    stats_request: int = 0
+    stats_pages: dict[str, int] = {"artist": 0, "genre": 0, "country": 0}
+    stats_rankings: dict[str, list[dict]] = {"artist": [], "genre": [], "country": []}
+    listening_rows: list[dict] = []
+    era_rows: list[dict] = []
+    gender_rows: list[dict] = []
+
+    @rx.var
+    def stats_visible(self) -> dict[str, list[dict]]:
+        return {kind: rows[self.stats_pages[kind] * 10:(self.stats_pages[kind] + 1) * 10]
+                for kind, rows in self.stats_rankings.items()}
+
+    @rx.var
+    def stats_ranges(self) -> dict[str, str]:
+        return {kind: (f"{self.stats_pages[kind] * 10 + 1}–"
+                       f"{min((self.stats_pages[kind] + 1) * 10, len(rows))} of {len(rows)} loaded"
+                       if rows else "0 loaded") for kind, rows in self.stats_rankings.items()}
+
+    def stats_turn_page(self, kind: str, direction: int):
+        if kind not in self.stats_pages:
+            return
+        last = max(0, (len(self.stats_rankings[kind]) - 1) // 10)
+        self.stats_pages[kind] = max(0, min(last, self.stats_pages[kind] + direction))
+
     artist_limit: str = "10"
     genre_limit: str = "10"
     country_limit: str = "10"
@@ -357,40 +385,65 @@ class UI(rx.State):
             self.busy = False
 
     async def stats_load(self):
+        self.stats_request += 1
+        request = self.stats_request
+        self.stats_loading = True
+        self.stats_error = ""
+        yield
         try:
             path = (f"/stats/data?artist_limit={self.artist_limit}"
                     f"&genre_limit={self.genre_limit}&country_limit={self.country_limit}")
-            self.stats = await asyncio.to_thread(_legacy, "GET", path)
-            self.stats_summary = self.stats.get("stats", self.stats_summary)
-            self.stats_display = {key: "0" for key in self.stats_summary}
-            self.top_artists = self.stats.get("top_artists", [])
-            self.top_genres = self.stats.get("top_genres", [])
-            self.genre_source = self.stats.get("genre_source", "tags")
-            self.by_country = self.stats.get("by_country", [])
-            self.by_era = self.stats.get("by_era", [])
-            self.by_gender = self.stats.get("by_gender", [])
-            self.listening_by_year = self.stats.get("listening_by_year", [])
-            self.listening_by_month = self.stats.get("listening_by_month", [])
-            self.listening_granularity = self.stats.get("listening_granularity", "year")
+            data = await asyncio.to_thread(_legacy, "GET", path)
+            if request != self.stats_request:
+                return
+            summary = data["stats"]
+            rankings = {
+                "artist": ranked_rows(data["top_artists"], "artist", "plays"),
+                "genre": ranked_rows(data["top_genres"], "tag", "cnt"),
+                "country": ranked_rows(data["by_country"], "country", "cnt"),
+            }
+            granularity = data.get("listening_granularity", "year")
+            listening = timeline_rows(data[f"listening_by_{granularity}"], granularity)
+            self.stats = data
+            self.stats_summary = summary
+            self.stats_display = {key: "0" for key in summary}
+            self.stats_rankings = rankings
+            for kind, rows in rankings.items():
+                self.stats_pages[kind] = min(self.stats_pages[kind], max(0, (len(rows) - 1) // 10))
+            self.genre_source = data.get("genre_source", "tags")
+            self.by_era = data["by_era"]
+            self.era_rows = ranked_rows(data["by_era"], "era", "cnt")
+            self.gender_rows = ranked_rows(data["by_gender"], "gender", "cnt")
+            self.listening_rows = listening
+            self.listening_granularity = granularity
+            self.stats_loaded = True
+            self.stats_loading = False
             yield
             for step in range(1, 25):
+                if request != self.stats_request:
+                    return
                 progress = 1 - (1 - step / 24) ** 3
                 self.stats_display = {
                     key: f"{round(value * progress):,}"
-                    for key, value in self.stats_summary.items()
+                    for key, value in summary.items()
                 }
                 yield
                 await asyncio.sleep(0.025)
         except Exception as exc:
-            self.message = str(exc)
-            yield
+            if request == self.stats_request:
+                self.stats_error = f"Could not load collection data: {exc}"
+        finally:
+            if request == self.stats_request:
+                self.stats_loading = False
+                yield
 
     async def set_stats_limit(self, kind: str, value: str):
-        if value not in {"10", "25", "50", "100"}:
+        if kind not in {"artist", "genre", "country"} or value not in {"10", "25", "50", "100"}:
             return
         setattr(self, f"{kind}_limit", value)
-        async for _ in self.stats_load():
-            yield
+        self.stats_pages[kind] = 0
+        async for event in self.stats_load():
+            yield event
 
     async def logs_load(self):
         try:
