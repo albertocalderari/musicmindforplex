@@ -34,10 +34,7 @@ services:
       - musicmind_full_data:/app/data
       - musicmind_full_models:/app/models
       - ${MUSIC_PATH}:${MUSIC_PATH}:ro
-    # Same real reasoning as docker-compose.slim.yml -- Flask's own
-    # dev server logs a real line per request, including the
-    # periodic status poll on the Admin page. Capped rather than
-    # left to accumulate unbounded.
+    # Cap application and ASGI server logs as in the slim variant.
     logging:
       driver: json-file
       options:

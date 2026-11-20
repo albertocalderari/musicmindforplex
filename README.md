@@ -6,7 +6,7 @@ _formerly Plex Music Brain_
 
 > **⚠️ Upgrading from v2? You must run a migration script before starting v3, or the app will refuse to start against your existing database rather than risk creating an empty one by mistake. See [Upgrading from v2](#upgrading-from-v2) below.**
 
-> **Latest release: 3.1.0** — country filter fixes, a new Chant / Choral / Sacred genre bucket, a Full Sync data-loss fix, and clearer OpenAI errors. Already on 3.0? See [Upgrading to 3.1](#upgrading-to-31) (one new dependency). Full details in [CHANGELOG.md](CHANGELOG.md).
+> **Latest release: 3.1.1** — fixes country features for users updating code without reinstalling dependencies. See [Upgrading to 3.1](#upgrading-to-31) for the `pycountry` dependency. Full details in [CHANGELOG.md](CHANGELOG.md).
 
 > The AI-enhanced music companion Plex should have built.
 
@@ -42,7 +42,7 @@ Type "late night psychedelic soul" and get a playlist. Ask for an upbeat running
 ## Requirements
 
 - Synology NAS (tested on DS920+, DSM 7.x) or any Linux box running Plex
-- Python 3.12
+- Python 3.14 (Essentia wheels used by Synapse are currently built for Python 3.14)
 - Plex Media Server
 - OpenAI API key (see [OpenAI pricing](https://openai.com/pricing) for current rates)
 - Last.fm account + free API key
@@ -65,8 +65,21 @@ Start below is for a direct, native install instead.
 For a local virtual environment, run `make install`, copy
 `config.example.py` to `config.py`, then run `make run`. Use
 `make install-full` for TensorFlow-backed voice/instrumental detection.
-The Makefile requires `uv` and uses `python3.12` by default; set
-`PYTHON` to another compatible interpreter if needed.
+The Makefile requires `uv` and uses the Python version in `.python-version`.
+On Apple Silicon it selects the native `~/.local/bin/uv` when present.
+
+For local voice/instrumental analysis, install the full variant and place
+Essentia's model in `models/`:
+
+```bash
+make install-full
+mkdir -p models
+curl -fL https://essentia.upf.edu/models/classifiers/voice_instrumental/voice_instrumental-musicnn-msd-1.pb -o models/voice_instrumental-musicnn-msd-1.pb
+```
+
+Model files are ignored by Git. The full Docker variant downloads this model
+into its persistent model volume. If Plex reports paths from another machine,
+set `PATH_MAP` in `config.py` so audio analysis can open the local files.
 
 The installable `musicmind_cli` package provides a `musicmind` command.
 Run it from the directory containing your `config.py`:
@@ -74,8 +87,15 @@ Run it from the directory containing your `config.py`:
 ```bash
 uv run musicmind db init   # create all database tables without contacting Plex
 uv run musicmind ingest    # import your Plex music library
-uv run musicmind serve     # start the web server on port 8787
+uv run musicmind serve     # start with auto reload on port 8787
+uv run musicmind serve --production  # fixed production build
 ```
+
+The web interface is built with Reflex and needs Node.js 22.22 or newer and npm
+on the machine running it. `musicmind serve` starts Reflex development mode with
+frontend hot reload at port 8787 and the backend at port 8788. Frontend changes
+appear in the open browser automatically. Use `--production` for the single-port
+fixed build used by Docker.
 
 The database command is safe to repeat: it adds missing tables and columns
 without importing data.
@@ -83,7 +103,7 @@ without importing data.
 1. Install dependencies
 
    ```bash
-   sudo python3.12 -m pip install '.[slim]' --break-system-packages
+   sudo python3.14 -m pip install '.[slim]' --break-system-packages
    ```
 
    Run this from the cloned MusicMind directory. Use `'.[full]'` for
@@ -100,45 +120,45 @@ without importing data.
 3. Initial setup (run once, in order — each is its own command)
 
    ```bash
-   python3.12 -m musicmind.ingest
+   python3.14 -m musicmind.ingest
    ```
 
    ```bash
-   python3.12 -m musicmind.plex.tag_tracks
+   python3.14 -m musicmind.plex.tag_tracks
    ```
 
    ```bash
-   python3.12 -m musicmind.enrichment.mb_enrich_artists
+   python3.14 -m musicmind.enrichment.mb_enrich_artists
    ```
 
    ```bash
-   python3.12 -m musicmind.enrichment.enrich_artists
+   python3.14 -m musicmind.enrichment.enrich_artists
    ```
 
    ```bash
-   sudo python3.12 -m musicmind.enrichment.enrich_compilations
+   sudo python3.14 -m musicmind.enrichment.enrich_compilations
    ```
 
    ```bash
-   python3.12 -m musicmind.lastfm.sync
+   python3.14 -m musicmind.lastfm.sync
    ```
 
    ```bash
-   python3.12 -m musicmind.lastfm.gaps
+   python3.14 -m musicmind.lastfm.gaps
    ```
 
    ```bash
-   python3.12 -m musicmind.analysis.listening_context
+   python3.14 -m musicmind.analysis.listening_context
    ```
 
    Synapse audio analysis (BPM / key / danceability) — start with an estimate:
 
    ```bash
-   python3.12 -m musicmind.analysis.synapse_analyze --estimate
+   python3.14 -m musicmind.analysis.synapse_analyze --estimate
    ```
 
    ```bash
-   python3.12 -m musicmind.analysis.synapse_analyze
+   python3.14 -m musicmind.analysis.synapse_analyze
    ```
 
    (or run Synapse from the admin page instead of the command line)
@@ -147,21 +167,22 @@ without importing data.
    Skip this block entirely if you don't want to modify your Plex metadata:
 
    ```bash
-   sudo python3.12 -m musicmind.plex.write_genres_to_plex --test  # preview only, nothing written
+   sudo python3.14 -m musicmind.plex.write_genres_to_plex --test  # preview only, nothing written
    ```
 
    ```bash
-   sudo python3.12 -m musicmind.plex.write_genres_to_plex --run    # actually writes to Plex
+   sudo python3.14 -m musicmind.plex.write_genres_to_plex --run    # actually writes to Plex
    ```
 
    ```bash
-   sudo python3.12 -m musicmind.plex.write_genres_to_plex --revert  # to undo
+   sudo python3.14 -m musicmind.plex.write_genres_to_plex --revert  # to undo
    ```
 
 4. Start the web app
 
    ```bash
-   sudo pm2 start python3.12 --name "musicmind" -- ~/musicmind/web/app.py
+   cd ~/musicmind
+   sudo pm2 start .venv/bin/python --name "musicmind" -- -m musicmind_cli serve
    sudo pm2 save
    ```
 
@@ -196,7 +217,7 @@ install.** v3 renamed the default database filename
 and database file still use the old name until you migrate them.
 
 ```bash
-python3.12 -m musicmind.migrations.migrate_v2_to_v3
+python3.14 -m musicmind.migrations.migrate_v2_to_v3
 ```
 
 This renames your real database file, updates `DB_PATH` in
@@ -222,7 +243,7 @@ MusicMind folder:
 
 ```bash
 git pull
-python3.12 -m pip install pycountry
+python3.14 -m pip install pycountry
 pm2 restart musicmind
 ```
 
@@ -258,11 +279,11 @@ Give MusicMind its own token rather than copying one out of Plex Web
 (a browser-session token stops working the moment you sign that
 browser out of Plex, taking MusicMind with it):
 
-1. From the MusicMind folder, run `python3.12 -m musicmind.plex.auth`
+1. From the MusicMind folder, run `python3.14 -m musicmind.plex.auth`
    (needs `plexapi` and `requests`, which MusicMind already installs)
 2. Open the link it prints, sign in to Plex, and approve
 3. Put the token it prints in `config.py` as `PLEX_TOKEN` -- or run
-   `python3.12 -m musicmind.plex.auth --write` to have it update `config.py`
+   `python3.14 -m musicmind.plex.auth --write` to have it update `config.py`
    for you (the old file is kept as `config.py.bak-<timestamp>`)
 4. Restart: `sudo pm2 restart musicmind` (Docker: put it in your
    `PLEX_TOKEN` variable and recreate the container)
@@ -293,9 +314,10 @@ OpenAI API costs are low. In real day-to-day use — including frequent testing 
 | `musicmind/plex/`       | Plex tagging, playlists, genres, and authentication        |
 | `musicmind/db/`         | Database maintenance commands                              |
 | `musicmind/migrations/` | Database migrations                                        |
-| `web/`                  | Flask app, templates, and static assets                    |
+| `musicmind_ui/`         | Reflex pages, state, and durable job launcher               |
+| `web/`                  | Compatibility API handlers and static assets                |
 
-Run commands from the repository root with `python3.12 -m musicmind.<module>`.
+Run commands from the repository root with `python3.14 -m musicmind.<module>`.
 
 ---
 

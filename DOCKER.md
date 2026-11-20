@@ -241,7 +241,6 @@ actually needed, so the Dockerfile can be updated for everyone.
   database, the downloaded VI model) will be owned by root. Worth
   knowing if you ever inspect or back up those files directly on
   the host filesystem.
-- The app serves itself via Flask's built-in development server,
-  not a hardened production WSGI server. Fine for use on your own
-  network; don't port-forward this container straight to the
-  public internet without putting a reverse proxy in front of it.
+- The Reflex frontend and FastAPI compatibility API run on a single
+  production ASGI server at port 8787. The compatibility handlers still
+  delegate to the existing Flask backend until that migration is complete.

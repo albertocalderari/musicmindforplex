@@ -19,6 +19,7 @@ import sqlite3
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
 import json
 from datetime import datetime
 from config import DB_PATH
@@ -105,8 +106,22 @@ class MBRequestError(Exception):
     pass
 
 
-MAX_RETRIES = 3
-RETRY_BACKOFF = 3  # seconds, multiplied by attempt number
+MAX_RETRIES = 5
+RETRY_BACKOFF = 5  # seconds, multiplied by attempt number; capped below
+MAX_RETRY_BACKOFF = 60
+
+
+def _retry_delay(error, attempt):
+    """Return a polite delay, honoring a server-provided Retry-After."""
+    if isinstance(error, urllib.error.HTTPError):
+        retry_after = error.headers.get("Retry-After") if error.headers else None
+        if retry_after:
+            try:
+                return min(MAX_RETRY_BACKOFF, max(1, int(retry_after)))
+            except ValueError:
+                # HTTP-date form is uncommon; fall back to exponential backoff.
+                pass
+    return min(MAX_RETRY_BACKOFF, RETRY_BACKOFF * (2 ** (attempt - 1)))
 
 
 def mb_request(url):
@@ -125,7 +140,7 @@ def mb_request(url):
         except Exception as e:
             last_error = e
             if attempt < MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF * attempt)
+                time.sleep(_retry_delay(e, attempt))
     raise MBRequestError(str(last_error))
 
 

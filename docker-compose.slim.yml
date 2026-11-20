@@ -54,9 +54,7 @@ services:
       # (Plex on a different host, or Windows-style paths), use
       # PATH_MAP_JSON above instead of forcing a matching mount.
       - ${MUSIC_PATH}:${MUSIC_PATH}:ro
-    # Flask's own dev server logs a real line per request, including
-    # the periodic status poll on the Admin page — capped rather than
-    # left to accumulate unbounded (10MB x 3 files = 30MB max).
+    # Cap application and ASGI server logs (10MB x 3 files = 30MB max).
     logging:
       driver: json-file
       options:

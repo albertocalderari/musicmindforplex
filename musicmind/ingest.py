@@ -120,11 +120,19 @@ def ingest(conn, plex):
                     skipped += 1
                     continue
 
-                # Incremental skip — only process tracks added since last ingest
+                # Ratings can change long after a track was added. Refresh them
+                # before skipping unchanged metadata, preserving fallback ratings
+                # only when Plex has no explicit rating.
                 if last_ingest and track.addedAt:
                     if track.addedAt.isoformat() <= last_ingest:
-                        skipped += 1
-                        continue
+                        refreshed = conn.execute(
+                            "UPDATE tracks SET user_rating=CASE WHEN ? > 0 THEN ? ELSE user_rating END "
+                            "WHERE rating_key=?",
+                            (track.userRating, track.userRating, str(track.ratingKey)),
+                        )
+                        if refreshed.rowcount:
+                            skipped += 1
+                            continue
 
                 genre = None
                 if artist.genres:
@@ -154,7 +162,7 @@ def ingest(conn, plex):
                         duration_ms=excluded.duration_ms,
                         play_count=excluded.play_count,
                         last_played=excluded.last_played,
-                        user_rating=excluded.user_rating,
+                        user_rating=COALESCE(NULLIF(excluded.user_rating, 0), tracks.user_rating),
                         added_at=excluded.added_at,
                         updated_at=excluded.updated_at,
                         rating_count=excluded.rating_count
@@ -184,6 +192,8 @@ def ingest(conn, plex):
                     )
 
     conn.commit()
+    from musicmind.itunes import apply_history
+    apply_history(conn)
     set_last_ingest(conn, now)
     print(f"\nDone. {inserted} tracks ingested, {skipped} skipped.")
 

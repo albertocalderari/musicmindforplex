@@ -5,6 +5,7 @@ MusicMind for Plex - Flask Web UI
 
 import sys
 import os
+import re
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,6 +17,7 @@ from musicmind.brain import (
     classify_prompt,
     search_tracks,
     sequence_for_flow,
+    PLAYLIST_ORDERS,
     create_playlist,
     PlexServer,
     PLEX_URL,
@@ -66,6 +68,9 @@ def onthisday():
     ISO date, not natural language needing interpretation.
     """
     data = request.json
+    order = data.get("order") or "BPM flow"
+    if order not in PLAYLIST_ORDERS:
+        return jsonify({"error": "Unknown playlist order"}), 400
     target_date = data.get("date", "").strip()
     if not target_date:
         return jsonify({"error": "No date provided"}), 400
@@ -86,10 +91,7 @@ def onthisday():
 
     tracks = search_tracks([], filters)
 
-    # DJ-ify sequencing now runs unconditionally on every playlist
-    # -- no longer a user-facing toggle, this is just what building
-    # a playlist means now.
-    tracks = sequence_for_flow(tracks)
+    tracks = sequence_for_flow(tracks, order)
 
     return jsonify(
         {
@@ -148,6 +150,9 @@ def based_on():
     data, AI only as a last-resort fallback) depending on what the
     user picked."""
     data = request.json
+    order = data.get("order") or "BPM flow"
+    if order not in PLAYLIST_ORDERS:
+        return jsonify({"error": "Unknown playlist order"}), 400
     seed_type = data.get("type")
     limit = int(data.get("limit", 30))
     max_per_artist = int(data.get("max_per_artist", 3))
@@ -172,9 +177,9 @@ def based_on():
                 intent="based_on_track",
             )
             update_query_log_result_count(
-                log_id, len(results), {"limit": limit, "max_per_artist": max_per_artist}
+                log_id, len(results), {"limit": limit, "max_per_artist": max_per_artist, "order": order}
             )
-            return jsonify({"tracks": results, "mode": "track"})
+            return jsonify({"tracks": sequence_for_flow(results, order), "mode": "track"})
         elif seed_type == "artist":
             artist = data.get("value")
             if not artist:
@@ -188,9 +193,9 @@ def based_on():
             update_query_log_result_count(
                 log_id,
                 len(results),
-                {"limit": limit, "max_per_artist": max_per_artist, "source": source},
+                {"limit": limit, "max_per_artist": max_per_artist, "source": source, "order": order},
             )
-            return jsonify({"tracks": results, "mode": "artist", "source": source})
+            return jsonify({"tracks": sequence_for_flow(results, order), "mode": "artist", "source": source})
         else:
             return jsonify({"error": "Unknown seed type"}), 400
     except Exception as e:
@@ -245,6 +250,9 @@ def handle_openai_error(e):
 @app.route("/preview", methods=["POST"])
 def preview():
     data = request.json
+    order = data.get("order") or "BPM flow"
+    if order not in PLAYLIST_ORDERS:
+        return jsonify({"error": "Unknown playlist order"}), 400
     prompt = data.get("prompt", "").strip()
     bucket_names = (
         data.get("buckets") or None
@@ -339,6 +347,7 @@ def preview():
             "bpm_min": int(data["bpm_min"]) if data.get("bpm_min") else None,
             "bpm_max": int(data["bpm_max"]) if data.get("bpm_max") else None,
             "danceability": data.get("danceability") or None,
+            "order": order,
             "bucket_names": bucket_names,
             "lastfm_rating_keys": lastfm_rating_keys,
             "title_search": classification.get("title_search"),
@@ -365,9 +374,7 @@ def preview():
         tracks = search_tracks(tags, filters)
         update_query_log_result_count(query_log_id, len(tracks), filters)
 
-        # DJ-ify sequencing now runs unconditionally on every
-        # playlist -- no longer a user-facing toggle.
-        tracks = sequence_for_flow(tracks)
+        tracks = sequence_for_flow(tracks, order)
 
         response = {
             "tags": tags,
@@ -375,7 +382,8 @@ def preview():
             "intent": intent,
             "search_term": search_term,
             "detected_filters": detected_filters,
-            "dj_ified": True,
+            "dj_ified": order == "BPM flow",
+            "playlist_order": order,
         }
 
         # Found via July 2026 fresh-install sanity check: checking
@@ -1443,22 +1451,15 @@ def other_processes_status():
 
 def _run_fullsync_pipeline():
     """
-    Runs the actual Full Sync pipeline (Plex scan + all ten pipeline
-    scripts), writing every line to FULLSYNC_LOG_PATH as it goes.
+    Runs the Full Sync pipeline with independent scripts scheduled
+    concurrently after their prerequisites complete.
 
     Found real (Aug 2026): even after tail_subprocess() fixed the
-    per-script pipe deadlock, a Full Sync still silently stopped
-    mid-pipeline the moment the browser tab disconnected -- because
-    the loop walking through all ten scripts lived inside the SAME
-    generator function that was directly streaming to the SSE
-    response. A dropped connection throws GeneratorExit at that
-    generator's current yield point, permanently unwinding the loop --
-    the individual subprocess that happened to be running might
-    finish fine on its own (file-backed now, no longer PIPE-deadlock
-    prone), but nothing was left alive to start the NEXT step.
-    Confirmed live: a real run froze mid-copy_forward_analysis.py
-    with no process left running and no error logged anywhere,
-    exactly matching this failure mode.
+    Full Sync remains independent of its HTTP/UI watcher. The worker
+    schedules each script only after its data prerequisites complete,
+    and lets unrelated scripts run concurrently. A disconnected status
+    viewer therefore cannot interrupt active work or prevent later
+    independent stages from starting.
 
     This function has ZERO dependency on any HTTP connection -- it's
     started once via threading.Thread from the /run/fullsync route
@@ -1466,17 +1467,52 @@ def _run_fullsync_pipeline():
     anyone, is watching. /run/fullsync and /run/fullsync-tail are now
     both pure log-file tailers; neither one drives the pipeline.
     """
+    import json
     import time
     from plexapi.server import PlexServer as PS
 
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    from threading import Lock
+
     log_file = open(FULLSYNC_LOG_PATH, "w")
+    log_lock = Lock()
+    progress_lock = Lock()
+    progress_path = os.path.join(BASE_DIR, "job_logs", "fullsync_progress.json")
+    os.makedirs(os.path.dirname(progress_path), exist_ok=True)
+    progress_state = {"phase": "Starting Plex scan", "step": 0, "progress": 0,
+                      "total": 12, "finished": False, "active": []}
+
+    def update_progress(*, phase=None, step=None, finished=None,
+                        start_stage=None, finish_stage=None):
+        with progress_lock:
+            if phase is not None:
+                progress_state["phase"] = phase
+            if step is not None:
+                progress_state["step"] = step
+                progress_state["progress"] = min(94, round(step / 12 * 94))
+            if finished is not None:
+                progress_state["finished"] = finished
+            if start_stage and start_stage not in progress_state["active"]:
+                progress_state["active"].append(start_stage)
+            if finish_stage and finish_stage in progress_state["active"]:
+                progress_state["active"].remove(finish_stage)
+            if progress_state["finished"] and progress_state["phase"] == "Full sync complete":
+                progress_state["progress"] = 100
+            temporary_path = progress_path + ".tmp"
+            with open(temporary_path, "w") as progress_file:
+                json.dump(progress_state, progress_file)
+                progress_file.flush()
+                os.fsync(progress_file.fileno())
+            os.replace(temporary_path, progress_path)
 
     def log_line(text):
-        log_file.write(text + "\n")
-        log_file.flush()
+        with log_lock:
+            log_file.write(text + "\n")
+            log_file.flush()
 
     try:
         # Step 1: Trigger Plex scan
+        update_progress(phase="Starting Plex scan")
         log_line("🔍 Triggering Plex library scan...")
         plex = PS(PLEX_URL, PLEX_TOKEN)
         music = plex.library.section(MUSIC_LIB)
@@ -1492,6 +1528,7 @@ def _run_fullsync_pipeline():
         # music.reload() forces a real re-fetch of just this
         # object's own state, bypassing the cache correctly.
         log_line("⏳ Waiting for Plex scan to complete...")
+        update_progress(phase="Waiting for Plex scan")
         max_wait_iterations = 360  # 5s * 360 = 30 minutes safety cap
         waited = 0
         while True:
@@ -1510,62 +1547,96 @@ def _run_fullsync_pipeline():
                 break
             log_line("⏳ Still scanning...")
         log_line("✅ Plex scan complete.")
+        log_line("FULLSYNC_DONE:plex_scan")
+        update_progress(phase="Plex scan complete", step=1)
 
-        # Steps 3-5: Run scripts in sequence
-        scripts = [
-            ("🔄 Syncing Plex Library...", MODULES["ingest.py"]),
-            (
-                "🔗 Fingerprinting new tracks...",
-                MODULES["fingerprint_tracks.py"],
-            ),
-            (
-                "♻️ Checking for known duplicates...",
-                MODULES["copy_forward_analysis.py"],
-            ),
-            (
-                "🎭 Resolving Various Artists tracks...",
-                MODULES["va_resolve.py"],
-            ),
-            (
-                "🏷️ Enriching compilations (ID3 fallback)...",
-                MODULES["enrich_compilations.py"],
-            ),
-            (
-                "🎼 Resolving recording IDs...",
-                MODULES["resolve_recording_mbids.py"],
-            ),
-            ("🎵 Syncing Last.fm...", MODULES["sync.py"]),
-            (
-                "🔍 Enriching artists (MusicBrainz)...",
-                MODULES["mb_enrich_artists.py"],
-            ),
-            (
-                "🤖 Enriching artists (AI fallback)...",
-                MODULES["enrich_artists.py"],
-            ),
-            ("🏷️ Tagging new tracks...", MODULES["tag_tracks.py"]),
-            (
-                "🧠 Analyzing audio (Synapse: BPM/key/danceability)...",
-                MODULES["synapse_analyze.py"],
-            ),
-        ]
-        for label, script in scripts:
+        stages = {
+            "ingest": ("🔄 Syncing Plex Library...", MODULES["ingest.py"], ()),
+            "fingerprint": ("🔗 Fingerprinting new tracks...", MODULES["fingerprint_tracks.py"], ("ingest",)),
+            "lastfm": ("🎵 Syncing Last.fm...", MODULES["sync.py"], ("enrich_compilations",)),
+            "va_resolve": ("🎭 Resolving Various Artists tracks...", MODULES["va_resolve.py"], ("ingest",)),
+            "mb_enrich": ("🔍 Enriching artists (MusicBrainz)...", MODULES["mb_enrich_artists.py"], ("enrich_compilations",)),
+            "tag_tracks": ("🏷️ Tagging new tracks...", MODULES["tag_tracks.py"], ("enrich_compilations",)),
+            "copy_forward": ("♻️ Checking for known duplicates...", MODULES["copy_forward_analysis.py"], ("fingerprint",)),
+            "recording_mbids": ("🎼 Resolving recording IDs...", MODULES["resolve_recording_mbids.py"], ("copy_forward",)),
+            "enrich_compilations": ("🏷️ Enriching compilations (ID3 fallback)...", MODULES["enrich_compilations.py"], ("va_resolve",)),
+            "ai_enrich": ("🤖 Enriching artists (AI fallback)...", MODULES["enrich_artists.py"], ("mb_enrich",)),
+            "synapse": ("🧠 Analyzing audio (Synapse: BPM/key/danceability)...", MODULES["synapse_analyze.py"], ("copy_forward",)),
+        }
+
+        def run_stage(stage_id, label, module):
+            update_progress(phase=label, start_stage=stage_id)
             log_line(label)
-            sync_result = {}
-            for line in tail_subprocess(
-                [sys.executable, "-u", "-m", script],
-                sync_result,
-                extra_popen_kwargs={"start_new_session": True},
-            ):
-                log_line(line)
-            if sync_result.get("returncode", 1) != 0:
-                log_line(f"❌ Error in {script}")
-                return
+            result = {}
+            try:
+                for line in tail_subprocess(
+                    [sys.executable, "-u", "-m", module],
+                    result,
+                ):
+                    log_line(f"[{stage_id}] {line}")
+            except Exception as exc:
+                log_line(f"[{stage_id}] ❌ {exc}")
+                return 1
+            return result.get("returncode", 1)
+
+        # Ingest is the gate for all library work. After it completes,
+        # independent tasks are launched together; stages that touch the
+        # same derived data wait for their specific prerequisite.
+        completed = {"plex_scan"}
+        failed = {}
+        pending = set(stages)
+        futures = {}
+        max_parallel = 6
+        with ThreadPoolExecutor(max_workers=max_parallel, thread_name_prefix="fullsync") as pool:
+            while pending or futures:
+                scheduled_or_skipped = False
+                for stage_id, (label, module, dependencies) in stages.items():
+                    if stage_id not in pending:
+                        continue
+                    failed_dependencies = [dep for dep in dependencies if dep in failed]
+                    if failed_dependencies:
+                        pending.remove(stage_id)
+                        failed[stage_id] = f"dependency failed: {', '.join(failed_dependencies)}"
+                        log_line(f"⚠️ Skipping {stage_id}; {failed[stage_id]}.")
+                        scheduled_or_skipped = True
+                    elif set(dependencies) <= completed and len(futures) < max_parallel:
+                        future = pool.submit(run_stage, stage_id, label, module)
+                        futures[future] = stage_id
+                        pending.remove(stage_id)
+                        scheduled_or_skipped = True
+
+                if futures:
+                    finished, _ = wait(futures, return_when=FIRST_COMPLETED)
+                    for future in finished:
+                        stage_id = futures.pop(future)
+                        try:
+                            exit_code = future.result()
+                        except Exception as exc:
+                            exit_code = 1
+                            log_line(f"[{stage_id}] ❌ Worker failed: {exc}")
+                        if exit_code == 0:
+                            completed.add(stage_id)
+                            log_line(f"FULLSYNC_DONE:{stage_id}")
+                            update_progress(step=len(completed), finish_stage=stage_id)
+                        else:
+                            failed[stage_id] = f"exit code {exit_code}"
+                            log_line(f"❌ Error in {stage_id} ({failed[stage_id]}).")
+                            update_progress(finish_stage=stage_id)
+                elif pending and not scheduled_or_skipped:
+                    log_line("❌ Full sync scheduler stalled; unresolved dependencies remain.")
+                    return
+
+        if failed:
+            update_progress(phase="Stopped with an error", finished=True)
+            log_line(f"❌ Full sync finished with {len(failed)} failed or skipped stage(s).")
+            return
 
         log_line("✅ Full sync complete.")
+        update_progress(phase="Full sync complete", step=12, finished=True)
 
     except Exception as e:
         log_line(f"❌ Exception: {e}")
+        update_progress(phase="Stopped with an error", finished=True)
     finally:
         running["fullsync"] = False
         log_file.close()
@@ -1796,67 +1867,6 @@ def countries():
     return jsonify(result)
 
 
-@app.route("/update")
-def update():
-    import subprocess
-
-    # Get local git info
-    git_info = {"is_git_repo": False}
-    try:
-        commit = (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=BASE_DIR, stderr=subprocess.DEVNULL
-            )
-            .decode()
-            .strip()
-        )
-        short = commit[:7]
-        date = (
-            subprocess.check_output(
-                ["git", "log", "-1", "--format=%ci"],
-                cwd=BASE_DIR,
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()[:10]
-        )
-        message = (
-            subprocess.check_output(
-                ["git", "log", "-1", "--format=%s"],
-                cwd=BASE_DIR,
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()
-        )
-        branch = (
-            subprocess.check_output(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=BASE_DIR,
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()
-        )
-        git_info = {
-            "is_git_repo": True,
-            "commit": short,
-            "date": date,
-            "message": message,
-            "branch": branch,
-            "path": BASE_DIR,
-        }
-    except:
-        git_info = {
-            "is_git_repo": False,
-            "path": BASE_DIR,
-        }
-
-    return render_template(
-        "update.html", git=git_info, is_master=IS_MASTER, year=datetime.now().year
-    )
-
-
 @app.route("/check-update")
 def check_update():
     import subprocess
@@ -1995,7 +2005,9 @@ def playlist_audit_data(playlist_key):
 
     try:
         plex = PlexServer(PLEX_URL, PLEX_TOKEN)
-        playlist = plex.fetchItem(playlist_key)
+        # Numeric fetchItem keys resolve to /library/metadata, which is
+        # for library media. Playlists have their own Plex API namespace.
+        playlist = plex.fetchItem(f"/playlists/{playlist_key}")
         items = playlist.items()
     except Exception as e:
         return jsonify({"error": f"Could not load playlist: {e}"}), 404
@@ -2215,6 +2227,14 @@ def stats_data():
     listening_by_year = conn.execute(
         "SELECT strftime('%Y', datetime(timestamp, 'unixepoch', 'localtime')) as year, COUNT(*) as plays FROM lastfm_scrobbles GROUP BY year ORDER BY year"
     ).fetchall()
+    listening_by_month = conn.execute(
+        "SELECT strftime('%Y-%m', datetime(timestamp, 'unixepoch', 'localtime')) as month, COUNT(*) as plays FROM lastfm_scrobbles GROUP BY month ORDER BY month"
+    ).fetchall()
+    from musicmind.itunes import listening_history
+    itunes_listening = listening_history(conn)
+    from musicmind.listening import combined_history
+    combined_listening = combined_history(conn)
+    listening_granularity = "month" if len(listening_by_year) < 4 else "year"
 
     top_artists = conn.execute(
         "SELECT COALESCE(real_artist, artist) as artist, SUM(play_count) as plays FROM tracks WHERE play_count > 0 AND artist IS NOT NULL AND artist != '' AND LOWER(COALESCE(real_artist, artist)) NOT IN ('various artists', 'va') GROUP BY COALESCE(real_artist, artist) ORDER BY plays DESC LIMIT ?",
@@ -2225,10 +2245,41 @@ def stats_data():
         "SELECT tag, COUNT(*) as cnt FROM track_tags GROUP BY tag ORDER BY cnt DESC LIMIT ?",
         (genre_limit,),
     ).fetchall()
+    genre_source = "tags"
+    if not top_genres:
+        top_genres = conn.execute(
+            "SELECT TRIM(genre) as tag, COUNT(*) as cnt FROM tracks "
+            "WHERE genre IS NOT NULL AND TRIM(genre) != '' "
+            "GROUP BY TRIM(genre) ORDER BY cnt DESC LIMIT ?",
+            (genre_limit,),
+        ).fetchall()
+        genre_source = "plex"
 
+    # Metadata describes current collection artists, including artists with no
+    # enrichment row. Old artist_meta entries must not inflate the collection.
+    collection_artists = """
+        WITH collection_artists AS (
+            SELECT DISTINCT COALESCE(NULLIF(real_artist, ''), artist) AS artist
+            FROM tracks WHERE COALESCE(NULLIF(real_artist, ''), artist) IS NOT NULL
+              AND TRIM(COALESCE(NULLIF(real_artist, ''), artist)) != ''
+        ), collection_metadata AS (
+            SELECT a.artist, m.era, m.country, m.gender
+            FROM collection_artists a LEFT JOIN artist_meta m ON m.artist = a.artist
+        )
+    """
     by_era = conn.execute(
-        "SELECT era, COUNT(*) as cnt FROM artist_meta WHERE era != 'unknown' AND era IS NOT NULL GROUP BY era ORDER BY era"
+        collection_artists + "SELECT era, COUNT(*) as cnt FROM collection_metadata WHERE era != 'unknown' AND era IS NOT NULL GROUP BY era"
     ).fetchall()
+    def decade_sort(row):
+        match = re.match(r"\d+", row[0] or "")
+        if not match:
+            return (1, row[0] or "")
+        digits = match.group(0)
+        decade = int(digits)
+        if len(digits) <= 2:
+            decade += 2000 if decade < 30 else 1900
+        return (0, decade)
+    by_era.sort(key=decade_sort)
 
     # Raw per-string counts first (no LIMIT here -- limiting before
     # canonicalizing would let "US" and "United States" each occupy a
@@ -2236,16 +2287,16 @@ def stats_data():
     # country). Canonicalization + LIMIT happens below, same pattern
     # as the /countries endpoint.
     by_country_raw = conn.execute(
-        "SELECT country, COUNT(*) as cnt FROM artist_meta WHERE country != 'unknown' AND country IS NOT NULL GROUP BY country"
+        collection_artists + "SELECT country, COUNT(*) as cnt FROM collection_metadata WHERE country != 'unknown' AND country IS NOT NULL GROUP BY country"
     ).fetchall()
 
     by_gender = conn.execute(
-        "SELECT gender, COUNT(*) as cnt FROM artist_meta WHERE gender IS NOT NULL GROUP BY gender ORDER BY cnt DESC"
+        collection_artists + "SELECT COALESCE(NULLIF(TRIM(gender), ''), 'Unclassified') AS category, COUNT(*) as cnt FROM collection_metadata GROUP BY category ORDER BY cnt DESC, category"
     ).fetchall()
 
     total_tracks = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
     total_artists = conn.execute(
-        "SELECT COUNT(DISTINCT COALESCE(real_artist, artist)) FROM tracks WHERE artist IS NOT NULL AND artist != ''"
+        collection_artists + "SELECT COUNT(*) FROM collection_artists"
     ).fetchone()[0]
     total_scrobbles = conn.execute("SELECT COUNT(*) FROM lastfm_scrobbles").fetchone()[
         0
@@ -2271,8 +2322,21 @@ def stats_data():
             "listening_by_year": [
                 {"year": r[0], "plays": r[1]} for r in listening_by_year
             ],
+            "listening_by_month": [
+                {"month": r[0], "plays": r[1]} for r in listening_by_month
+            ],
+            "itunes_listening_by_year": itunes_listening['year'],
+            "itunes_listening_by_month": itunes_listening['month'],
+            "total_itunes_dated_plays": itunes_listening['total'],
+            "combined_listening_by_year": combined_listening['year'],
+            "combined_listening_by_month": combined_listening['month'],
+            "total_known_dated_plays": combined_listening['total'],
+            "listening_source_counts": combined_listening['sources'],
+            "listening_duplicates_removed": combined_listening['duplicates'],
+            "listening_granularity": listening_granularity,
             "top_artists": [{"artist": r[0], "plays": r[1]} for r in top_artists],
             "top_genres": [{"tag": r[0], "cnt": r[1]} for r in top_genres],
+            "genre_source": genre_source,
             "by_era": [{"era": r[0], "cnt": r[1]} for r in by_era],
             "by_country": [{"country": r[0], "cnt": r[1]} for r in by_country],
             "by_gender": [{"gender": r[0], "cnt": r[1]} for r in by_gender],

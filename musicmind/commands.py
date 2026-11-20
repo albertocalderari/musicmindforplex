@@ -1,6 +1,7 @@
 """Stable command names for the web UI and documented CLI workflows."""
 
 MODULES = {
+    "plex_history.py": "musicmind.plex.history",
     "ingest.py": "musicmind.ingest",
     "sync.py": "musicmind.lastfm.sync",
     "gaps.py": "musicmind.lastfm.gaps",

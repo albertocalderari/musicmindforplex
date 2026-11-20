@@ -68,7 +68,8 @@ sudo python3.12 -m musicmind.plex.write_genres_to_plex --run    # Write genres t
 **5. Start the web app**
 
 ```bash
-sudo pm2 start python3.12 --name "musicmind" -- ~/musicmind/web/app.py
+cd ~/musicmind
+sudo pm2 start .venv/bin/python --name "musicmind" -- -m musicmind_cli serve
 sudo pm2 save
 ```
 
@@ -467,3 +468,47 @@ Part of the [Verbena Projects](https://verbenaprojects.com) family · [vp-fun.co
 ---
 
 _MusicMind for Plex is not affiliated with or endorsed by Plex. Plex is a trademark of Plex, Inc._
+
+### Import listening history from iTunes or Apple Music
+
+Export your entire library using **File → Library → Export Library** in iTunes
+or Apple Music. In MusicMind's **Admin** page, choose the XML file under
+**Import iTunes listening history**, then click **Import history**. The maximum
+file size is 50 MiB; the binary `.itl` database is not supported.
+
+The import stores play counts and the last-played date. **Collection** shows one
+stacked listening chart: plays in each period, with labelled Last.fm, Plex, and
+iTunes contributions. Each iTunes last-played date contributes one known play,
+not the track’s lifetime play count. Repeated imports retain newly observed dates
+without duplicating existing ones. Earlier plays have no dates in the XML and
+cannot be reconstructed. Matching tracks within one minute across sources count
+once, preferring Last.fm, then Plex, then iTunes; other overlaps may remain.
+Imports do not create Last.fm scrobbles or populate date-based playlists.
+Existing imports appear without uploading again.
+
+In **Admin → Library**, run **Sync Plex listening history** to import retained
+music plays for the Plex server owner. You can also run
+`uv run python -m musicmind.plex.history` (use `--account-id` for another local Plex
+account). It imports all available dates, including dates before Last.fm began;
+the range depends on what the server has retained. Repeating the sync is safe.
+
+Tracks match by artist, title and album; ambiguous matches remain unmatched.
+Unmatched records are retained and checked again after library ingestion or
+Last.fm sync.
+
+Reimporting updates records without adding duplicate plays. MusicMind keeps
+the higher existing or imported play count, rather than summing totals that
+may overlap with Last.fm. The most recent last-played date is retained. Uploaded
+library files are processed privately and are not saved as downloadable assets.
+
+Explicit iTunes star ratings are also imported (five stars maps to 10 in
+MusicMind). Automatically computed ratings are ignored, and existing MusicMind
+ratings are preserved. Explicit Plex ratings are authoritative: library sync
+refreshes them even for tracks added long ago. iTunes ratings and Last.fm loved
+tracks only fill missing ratings; they do not overwrite existing ratings.
+
+Under **Library Operations**, click **Sync star ratings** to pull Plex ratings into
+MusicMind and fill only unrated Plex tracks from MusicMind. A rating corrected in
+Plex replaces the database rating, never the other way around. The result reports
+ratings imported from Plex, filled in Plex, unchanged, and failed tracks.
+Reimport your XML if it was uploaded before star-rating support was added.

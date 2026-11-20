@@ -7,7 +7,7 @@ name = "musicmindforplex"
 version = "3.1.1"
 description = "MusicMind for Plex music library companion"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
@@ -17,6 +17,8 @@ dependencies = [
     "mutagen",
     "requests",
     "pycountry",
+    "reflex>=0.11,<0.12",
+    "fastapi>=0.164.0",
 ]
 
 [project.scripts]
@@ -24,7 +26,11 @@ musicmind = "musicmind_cli.cli:main"
 
 [project.optional-dependencies]
 slim = ["essentia"]
-full = ["essentia-tensorflow", "numpy"]
+full = [
+    "essentia-tensorflow>=2.1b6.dev1438",
+    "tensorflow==2.22.0rc0",
+    "numpy",
+]
 
 test = [
     "pytest",
@@ -32,7 +38,7 @@ test = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["musicmind", "musicmind.*", "musicmind_cli", "musicmind_cli.*", "web"]
+include = ["musicmind", "musicmind.*", "musicmind_cli", "musicmind_cli.*", "musicmind_ui", "musicmind_ui.*", "web"]
 
 [tool.setuptools.package-data]
 web = ["templates/*.html", "static/*"]

@@ -1,3 +1,8 @@
+assets/external/
+.web
+.states
+*.py[cod]
+job_logs/
 # Credentials — never commit these
 config.py
 
@@ -29,3 +34,6 @@ models/
 *.bak-*
 *.bak*
 /.coverage
+/.states/
+/.web/
+/job_logs/

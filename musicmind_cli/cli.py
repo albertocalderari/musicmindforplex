@@ -2,6 +2,9 @@
 
 import argparse
 import sqlite3
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,6 +23,8 @@ def main(argv=None):
     serve = commands.add_parser("serve", help="start the web server")
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8787)
+    serve.add_argument("--production", action="store_true",
+                       help="serve a fixed production build without auto reload")
 
     database = commands.add_parser("db", help="database commands")
     database_commands = database.add_subparsers(dest="db_command", required=True)
@@ -29,9 +34,23 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
     if args.command == "serve":
-        from web.app import app
-
-        app.run(host=args.host, port=args.port, debug=False)
+        env = os.environ.copy()
+        env.setdefault("REFLEX_USE_NPM", "1")
+        node_bin = shutil.which("node", path=env.get("PATH"))
+        if node_bin:
+            version = subprocess.check_output(
+                [node_bin, "-p", "process.versions.node"], text=True
+            ).strip()
+            if tuple(int(part) for part in version.split(".")[:3]) >= (22, 22, 0):
+                env["PATH"] = f"{Path(node_bin).parent}{os.pathsep}{env.get('PATH', '')}"
+        mode = "prod" if args.production else "dev"
+        backend_port = args.port if args.production else args.port + 1
+        raise SystemExit(subprocess.call(
+            [sys.executable, "-m", "reflex", "run", "--env", mode,
+             "--frontend-port", str(args.port), "--backend-port", str(backend_port),
+             "--backend-host", args.host],
+            cwd=config_root, env=env,
+        ))
     elif args.command == "db":
         from config import DB_PATH
         from musicmind.db.schema import init_all
