@@ -184,6 +184,8 @@ def ingest(conn, plex):
                     )
 
     conn.commit()
+    from musicmind.itunes import apply_history
+    apply_history(conn)
     set_last_ingest(conn, now)
     print(f"\nDone. {inserted} tracks ingested, {skipped} skipped.")
 

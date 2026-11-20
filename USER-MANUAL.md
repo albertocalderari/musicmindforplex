@@ -468,3 +468,21 @@ Part of the [Verbena Projects](https://verbenaprojects.com) family · [vp-fun.co
 ---
 
 _MusicMind for Plex is not affiliated with or endorsed by Plex. Plex is a trademark of Plex, Inc._
+
+### Import listening history from iTunes or Apple Music
+
+Export your entire library using **File → Library → Export Library** in iTunes
+or Apple Music. In MusicMind's **Admin** page, choose the XML file under
+**Import iTunes listening history**, then click **Import history**. The maximum
+file size is 50 MiB; the binary `.itl` database is not supported.
+
+The import stores play counts and the last-played date. iTunes library exports
+ do not include a timestamp for every play, so imported counts do not populate
+Last.fm listening timelines or date-based playlists. Tracks match by artist,
+title and album; ambiguous matches remain unmatched. Unmatched records are
+retained and checked again after library ingestion or Last.fm sync.
+
+Reimporting updates records without adding duplicate plays. MusicMind keeps
+the higher existing or imported play count, rather than summing totals that
+may overlap with Last.fm. The most recent last-played date is retained. Uploaded
+library files are processed privately and are not saved as downloadable assets.

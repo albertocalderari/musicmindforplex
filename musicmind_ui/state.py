@@ -68,6 +68,32 @@ def _home_stats() -> dict[str, int]:
 
 
 class UI(rx.State):
+    itunes_importing: bool = False
+    itunes_result: str = ""
+
+    async def import_itunes(self, files: list[rx.UploadFile]):
+        from musicmind.itunes import MAX_UPLOAD_BYTES, import_library
+
+        self.itunes_importing = True
+        self.itunes_result = "Importing iTunes library…"
+        yield
+        try:
+            if len(files) != 1:
+                raise ValueError("Select one library XML export.")
+            data = await files[0].read(MAX_UPLOAD_BYTES + 1)
+            result = await asyncio.to_thread(import_library, data, DB_PATH)
+            self.itunes_result = (
+                f"Imported {result['imported']} tracks; {result['matched']} stored tracks matched to Plex; "
+                f"{result['skipped']} skipped. Reimporting does not add duplicate plays."
+            )
+            yield rx.clear_selected_files("itunes-library")
+        except Exception as exc:
+            self.itunes_result = f"Import failed: {exc}"
+        finally:
+            for file in files:
+                await file.close()
+            self.itunes_importing = False
+
     theme: str = "light"
     filters_open: bool = False
     filter_section: str = "Sound"

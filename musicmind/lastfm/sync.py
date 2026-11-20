@@ -446,6 +446,8 @@ def update_play_counts(conn):
         )
         WHERE rating_key IN (SELECT DISTINCT rating_key FROM lastfm_scrobbles WHERE rating_key IS NOT NULL)
     """)
+    from musicmind.itunes import apply_history
+    apply_history(conn)
     conn.commit()
     updated = conn.execute(
         "SELECT COUNT(*) FROM tracks WHERE play_count > 0"

@@ -10,7 +10,8 @@ import httpx
 from fastapi.responses import Response
 from reflex.state import MutableProxy
 
-from musicmind_ui.musicmind_ui import _legacy, api, app
+from musicmind_ui.musicmind_ui import api, app
+from musicmind_ui.state import _legacy
 
 
 class ReflexFrontendTests(unittest.IsolatedAsyncioTestCase):
