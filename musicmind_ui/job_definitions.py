@@ -1,6 +1,6 @@
 """Shared job labels and groups for UI state and page rendering."""
 
-JOB_LABELS = [("fullsync", "Full Sync"), ("ingest", "Sync Plex Library"),
+JOB_LABELS = [("plex_history", "Sync Plex listening history"), ("fullsync", "Full Sync"), ("ingest", "Sync Plex Library"),
               ("lastfm", "Sync Last.fm"), ("tagger", "Tag tracks"),
               ("context", "Listening context"), ("mbenrich", "MusicBrainz enrichment"),
               ("aienrich", "AI enrichment"), ("gaps", "Find collection gaps"),
@@ -13,6 +13,7 @@ JOB_LABELS = [("fullsync", "Full Sync"), ("ingest", "Sync Plex Library"),
 JOB_GROUPS = [
     ("Library", "Run individual library and listening-history updates.", [
         ("ingest", "Sync Plex library", "Imports Plex's current library into MusicMind's local index."),
+        ("plex_history", "Sync Plex listening history", "Imports dated music plays retained by Plex for the server owner."),
         ("lastfm", "Sync Last.fm", "Updates listening history and recent play counts."),
     ]),
     ("Enrichment", "Add descriptive metadata used by search, charts, and playlist matching.", [
@@ -33,4 +34,14 @@ JOB_GROUPS = [
     ]),
 ]
 
+
+
+
+def _job_label(name: str) -> str:
+    labels = dict(JOB_LABELS)
+    labels["synapse_full"] = "Synapse audio analysis"
+    labels["synapse_limited"] = "Limited Synapse analysis"
+    labels["synapse_count"] = "Synapse track count"
+    labels["synapse_estimate"] = "Synapse time estimate"
+    return labels.get(name, name.replace("_", " ").title())
 

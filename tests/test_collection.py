@@ -67,11 +67,17 @@ def test_metadata_counts_only_current_artists_and_includes_missing_gender(tmp_pa
             CREATE TABLE artist_meta (artist TEXT, era TEXT, country TEXT, gender TEXT);
             CREATE TABLE track_tags (rating_key TEXT, tag TEXT);
             CREATE TABLE lastfm_scrobbles (timestamp INTEGER);
+            CREATE TABLE itunes_history (library_id TEXT, track_id TEXT, play_count INTEGER, last_played TEXT);
+            INSERT INTO itunes_history VALUES ('library','track',100,'2020-01-02T00:00:00+00:00');
+            INSERT INTO lastfm_scrobbles VALUES (1577923200);
             INSERT INTO tracks VALUES ('1','Current',NULL,3,'Jazz',0), ('2','Missing',NULL,0,NULL,0);
             INSERT INTO artist_meta VALUES ('Current','1990s','US','unknown'), ('Removed','1980s','GB','male');
         ''')
     with patch.object(backend, 'DB_PATH', str(database)), app.test_client() as client:
         data = client.get('/stats/data').get_json()
+    assert data['total_itunes_dated_plays'] == 1
+    assert data['itunes_listening_by_year'] == [{'year': '2020', 'plays': 1}]
+    assert data['stats']['total_scrobbles'] == 1
     assert data['by_era'] == [{'era': '1990s', 'cnt': 1}]
     assert sum(row['cnt'] for row in data['by_country']) == 1
     assert {r['gender']: r['cnt'] for r in data['by_gender']} == {'unknown': 1, 'Unclassified': 1}
@@ -147,3 +153,16 @@ def test_all_result_limits_keep_at_most_ten_rows_visible(limit):
             state.stats_turn_page('artist', 1)
         assert seen == list(range(1, int(limit) + 1))
     asyncio.run(check())
+
+
+def test_combined_chart_sums_sources_per_period_without_accumulating():
+    state = UI(_reflex_internal_init=True)
+    state.stats = {'combined_listening_by_year': [{'year': '2020', 'plays': 3}],
+                   'combined_listening_by_month': [{'month': '2020-01', 'plays': 2, 'lastfm': 1, 'plex': 1},
+                                                   {'month': '2020-03', 'plays': 1, 'itunes': 1}],
+                   'total_known_dated_plays': 3}
+    assert [row['plays'] for row in state.listening_rows] == [2, None, 1]
+    for row in state.listening_rows:
+        if row['plays'] is not None:
+            assert sum(row[source] for source in ('lastfm', 'plex', 'itunes')) == row['plays']
+    assert state.listening_total == '3'

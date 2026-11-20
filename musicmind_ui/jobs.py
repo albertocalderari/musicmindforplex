@@ -18,6 +18,7 @@ from musicmind.paths import PROJECT_ROOT
 
 JOB_DIR = PROJECT_ROOT / "job_logs"
 COMMANDS = {
+    "plex_history": "plex_history.py",
     "ingest": "ingest.py",
     "lastfm": "sync.py",
     "tagger": "tag_tracks.py",
@@ -39,13 +40,13 @@ TEST_COMMANDS = {
     "ai_limited_run": ("enrich_artists.py", ["--limit", "1"]),
 }
 GROUP_COMMANDS = {
-    "group_library": ("ingest", "lastfm"),
+    "group_library": ("ingest", "plex_history", "lastfm"),
     "group_enrichment": ("mbenrich", "aienrich", "tagger", "context", "recordingmbid"),
     "group_analysis": ("gaps", "fingerprint", "copyforward"),
     "group_maintenance": ("dedup", "varesolve"),
 }
 FULLSYNC_CHILD_JOBS = {
-    "ingest", "fingerprint", "copyforward", "varesolve", "recordingmbid",
+    "plex_history", "ingest", "fingerprint", "copyforward", "varesolve", "recordingmbid",
     "lastfm", "mbenrich", "aienrich", "tagger", "synapse", "synapse_full",
     "synapse_limited",
 }

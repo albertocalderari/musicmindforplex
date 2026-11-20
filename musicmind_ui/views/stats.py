@@ -25,14 +25,21 @@ def empty(message: str, action: str = "Manage library and enrichment"):
     return rx.box(rx.text(message), rx.link(action, href="/admin"), class_name="collection-empty")
 
 
-def data_table(rows, label: str, *, timeline=False):
+def data_table(rows, label, *, timeline=False):
+    if timeline:
+        return rx.el.table(
+            rx.el.caption(label),
+            rx.el.thead(rx.el.tr(*[rx.el.th(name, scope="col")
+                for name in ("Period", "Last.fm", "Plex", "iTunes", "Total")])),
+            rx.el.tbody(rx.foreach(rows, lambda row: rx.el.tr(
+                rx.el.th(row["label"], scope="row"),
+                *[rx.el.td(row[f"{source}_display"]) for source in ("lastfm", "plex", "itunes")],
+                rx.el.td(row["display"])))), class_name="collection-table collection-listening-table")
     return rx.el.table(
         rx.el.caption(label),
-        rx.el.thead(rx.el.tr(rx.el.th("Period" if timeline else "Category", scope="col"),
-                              rx.el.th("Recorded plays" if timeline else "Artists", scope="col"))),
+        rx.el.thead(rx.el.tr(rx.el.th("Category", scope="col"), rx.el.th("Artists", scope="col"))),
         rx.el.tbody(rx.foreach(rows, lambda row: rx.el.tr(
-            rx.el.th(row["label"] if timeline else row["name"], scope="row"),
-            rx.el.td(row["display"] if timeline else row["count"])))),
+            rx.el.th(row["name"], scope="row"), rx.el.td(row["count"])))),
         class_name="collection-table")
 
 
@@ -93,26 +100,29 @@ def overview():
 
 def listening():
     return rx.el.section(
-        rx.text("LISTENING · LAST.FM", class_name="section-kicker"),
-        rx.box(heading("Your listening over time", "Recorded plays: " + UI.stats_display["total_scrobbles"]),
+        rx.text("LISTENING · LAST.FM, PLEX & ITUNES", class_name="section-kicker"),
+        rx.box(heading("Your listening over time", "Known dated plays: " + UI.listening_total),
             rx.cond(UI.listening_rows.length() > 0,
                 rx.fragment(
-                    chart_frame(rx.recharts.line_chart(
+                    chart_frame(rx.recharts.area_chart(
                         rx.recharts.cartesian_grid(stroke="var(--collection-grid)", vertical=False),
                         rx.recharts.x_axis(data_key="label", min_tick_gap=42, tick_line=False,
                                            stroke="var(--muted)"),
                         rx.recharts.y_axis(allow_decimals=False, domain=[0, "auto"], width=55,
                                            stroke="var(--muted)"),
                         tooltip(),
-                        rx.recharts.line(data_key="plays", name="Recorded plays", type_="linear",
-                                         stroke="var(--collection-listening)", stroke_width=3,
-                                         connect_nulls=False, is_animation_active=False, dot=True),
+                        rx.recharts.legend(),
+                        *[rx.recharts.area(
+                            data_key=source, name=label, stack_id="sources", type_="linear",
+                            stroke=f"var(--collection-{source})", fill=f"var(--collection-{source})",
+                            fill_opacity=0.65, connect_nulls=False, is_animation_active=False)
+                          for source, label in [("lastfm", "Last.fm"), ("plex", "Plex"), ("itunes", "iTunes")]],
                         data=UI.listening_rows, width="100%", height=280,
                         margin={"top": 12, "right": 16, "bottom": 8, "left": 0})),
-                    rx.text("Recorded plays · Gaps mean no recorded data; sync coverage is unknown. Periods use the server’s local time.",
+                    rx.text("Recorded plays per period, stacked by source. iTunes contributes one play per observed last-played date; earlier plays are undated. Matching tracks within one minute across sources count once, preferring Last.fm, then Plex, then iTunes. Other overlaps may remain. Gaps mean no recorded data; dates use server local time.",
                             class_name="collection-note"),
-                    disclosure("View listening data", data_table(UI.listening_rows, "Last.fm recorded listening", timeline=True))),
-                empty("No listening history yet.", "Sync Last.fm in Admin")),
+                    disclosure("View listening data", data_table(UI.listening_rows, "Recorded plays per period by source", timeline=True))),
+                empty("No dated listening history yet.", "Sync Plex or Last.fm, or import iTunes in Admin")),
             class_name="collection-chart collection-listening"), class_name="collection-section")
 
 

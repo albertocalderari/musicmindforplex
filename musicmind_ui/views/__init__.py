@@ -14,4 +14,4 @@ from .components import (
 )
 from .home import home, home_art, home_stat, home_visual_gallery
 from .stats import stats_page
-from .tools import audit_page, gaps_page, guide_page, logs_page, query_page, tests_page, update_page
+from .tools import audit_page, gaps_page, guide_page, logs_page, query_page, tests_page

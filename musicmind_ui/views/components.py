@@ -6,14 +6,11 @@ from musicmind_ui.state import LASTFM_KEY, UI
 
 def nav():
     links = [("Playlists", "/"), ("Collection", "/stats"), ("Gaps", "/gaps")]
-    admin_links = [("settings", "Overview", "/admin"),
-                   ("database", "DB Console", "/db"),
-                   ("search", "Playlist Audit", "/playlist-audit"),
-                   ("flask-conical", "Tests", "/tests"),
-                   ("brain", "Synapse", "/admin#synapse"),
-                   ("logs", "Logs", "/logs"),
-                   ("book-open", "Guide", "/guide"),
-                   ("refresh-cw", "Update", "/update")]
+    admin_groups = [
+        ("WORKSPACE", [("settings", "Admin overview", "/admin"), ("brain", "Audio analysis", "/admin#synapse")]),
+        ("DIAGNOSTICS", [("search", "Playlist audit", "/playlist-audit"), ("database", "Database console", "/db"), ("flask-conical", "System tests", "/tests"), ("logs", "Logs", "/logs")]),
+        ("HELP", [("book-open", "Guide", "/guide")]),
+    ]
     return rx.box(
         rx.link("MUSICMIND / PLEX", href="/", class_name="nav-brand"),
         rx.hstack(
@@ -23,13 +20,10 @@ def nav():
                 rx.menu.trigger(rx.button(rx.icon("settings", size=16), "Admin", rx.icon("chevron-down", size=14),
                                           variant="ghost", class_name="nav-admin-trigger")),
                 rx.menu.content(
-                    rx.text("WORKSPACE", class_name="admin-menu-label"),
-                    *[rx.menu.item(rx.icon(icon, size=16), label, on_select=rx.redirect(path))
-                      for icon, label, path in admin_links[:5]],
-                    rx.menu.separator(),
-                    rx.text("SUPPORT & ACTIVITY", class_name="admin-menu-label"),
-                    *[rx.menu.item(rx.icon(icon, size=16), label, on_select=rx.redirect(path))
-                      for icon, label, path in admin_links[5:]],
+                    *[rx.fragment(rx.text(group, class_name="admin-menu-label"),
+                                  *[rx.menu.item(rx.icon(icon, size=16), label, on_select=rx.redirect(path))
+                                    for icon, label, path in entries])
+                      for group, entries in admin_groups],
                     class_name="nav-admin-menu", align="end", side_offset=8)),
             class_name="nav-links", wrap="wrap"),
         rx.el.details(
@@ -70,7 +64,7 @@ def shell(title: str, subtitle: str, *children, show_intro: bool = True):
             ("parchment", "app-shell theme-parchment"),
             ("ocean", "app-shell theme-ocean"),
             ("forest", "app-shell theme-forest"),
-            "app-shell"),
+            "app-shell theme-light"),
     )
 
 

@@ -456,11 +456,11 @@ def update_play_counts(conn):
 
 
 def update_loved_ratings(conn):
-    print("\nUpdating ratings for loved tracks...")
+    print("\nFilling unrated loved tracks with a 5-star rating...")
     conn.execute("""
         UPDATE tracks
         SET user_rating = 10
-        WHERE rating_key IN (
+        WHERE COALESCE(user_rating, 0) = 0 AND rating_key IN (
             SELECT rating_key FROM lastfm_loved
             WHERE rating_key IS NOT NULL
         )

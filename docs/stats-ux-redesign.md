@@ -146,3 +146,23 @@ Do not trigger synchronization automatically from this page. Announce loading/er
 - Check at 320, 390, 768, 1024, and 1440px, plus 200% zoom. Review with empty data, long names, large counts, and all result limits.
 
 Deliver the implementation with desktop/mobile screenshots, a short accessibility check, and a note identifying any unresolved data definitions.
+
+## Implementation comments — current listening model
+
+**These comments supersede the earlier Last.fm-only listening labels and empty-state instructions.** The current backend combines known dated observations from Last.fm, Plex, and iTunes. Preserve that model during redesign.
+
+- Label the section **Listening history** and the quantity **Recorded plays**. Use a caption such as “Known dated plays from Last.fm, Plex, and iTunes; overlapping observations are deduplicated.” Identify available sources from actual data rather than implying all integrations are connected.
+- Use the combined-history total for that section. Keep any lifetime Plex play counts or Last.fm-only scrobble totals explicitly labeled and separate; they are not interchangeable with the combined dated total.
+- The backend currently considers cross-source observations of the same identified track within 60 seconds overlapping, with Last.fm, then Plex, then iTunes taking precedence. Source contributions describe retained observations after this deduplication, not each service's raw total. Do not change that policy as part of styling.
+- iTunes contributes known last-played observations, not an invented dated distribution of aggregate play counts. Explain incomplete history without claiming an empty timeline whenever Last.fm is absent.
+- Reuse `combined_timeline_rows()` and its explicit unknown-period handling in `musicmind_ui/collection.py`. Preserve gaps rather than plotting missing periods as zero. Keep displayed totals and source columns aligned with the same dataset.
+- An empty listening section should say “No dated listening history yet” and point to relevant library-history sync/import tools in Admin. Do not require Last.fm specifically.
+- Verify the timezone used for date grouping before adding timezone copy; the current aggregation uses the server's local datetime conversion. Do not imply the browser timezone controls grouping.
+- Reuse existing ranked-row/timeline presentation helpers where suitable. Inspect the current page before replacing components: implementation has progressed since the original brief, so retain already-working accessibility and data handling.
+- Validate with one source, multiple overlapping sources, iTunes-only observations, missing periods, and no dated observations. Confirm that timeline tables and chart tooltips agree. Review all five application themes, not only light and midnight.
+
+**Development order:** reconcile listening labels and units first; then implement page hierarchy and ranked-list behavior; then finish loading/error states, responsive layout, and accessibility verification. No backend listening-policy change is required by this brief.
+
+## Shared theme follow-up
+
+Apply the shared [Theme UX review](theme-ux-review.md). Midnight is approved; the other four themes need complete component palettes. In particular, make chart axes, tooltips, ranked bars, metric values, selected controls, and full-page backgrounds theme-aware without changing data meaning.

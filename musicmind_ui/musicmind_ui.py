@@ -19,7 +19,6 @@ from musicmind_ui.views import (
     query_page,
     stats_page,
     tests_page,
-    update_page,
 )
 
 
@@ -85,9 +84,30 @@ for route, methods in LEGACY_API:
     api.add_api_route(route, legacy_api, methods=methods, include_in_schema=False)
 
 
+THEME_BOOTSTRAP = """
+(() => {
+    const root = document.documentElement;
+    const applyTheme = (value) => {
+        const valid = ['light', 'parchment', 'midnight', 'ocean', 'forest'];
+        root.dataset.theme = valid.includes(value) ? value : 'light';
+        root.style.colorScheme = root.dataset.theme === 'midnight' ? 'dark' : 'light';
+    };
+    try {
+        applyTheme(localStorage.getItem('musicmind-theme'));
+    } catch {
+        applyTheme(null);
+    }
+    window.addEventListener('storage', (event) => {
+        if (event.key === 'musicmind-theme' || event.key === null) applyTheme(event.newValue);
+    });
+    window.applyMusicMindTheme = applyTheme;
+})();
+"""
+
 app = rx.App(
     api_transformer=api,
     stylesheets=["/reflex.css"],
+    head_components=[rx.el.script(THEME_BOOTSTRAP)],
 )
 for page, route, on_load in [
     (home, "/", UI.home_load),
@@ -98,7 +118,6 @@ for page, route, on_load in [
     (query_page, "/db", None),
     (gaps_page, "/gaps", UI.gaps_load),
     (audit_page, "/playlist-audit", UI.playlists_load),
-    (update_page, "/update", UI.update_load),
     (tests_page, "/tests", None),
     (guide_page, "/guide", UI.guide_load),
 ]:

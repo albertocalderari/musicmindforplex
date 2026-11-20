@@ -7,8 +7,8 @@ import sqlite3
 import reflex as rx
 from musicmind.paths import PROJECT_ROOT
 from musicmind_ui import jobs
-from musicmind_ui.collection import ranked_rows, timeline_rows
-from musicmind_ui.job_definitions import JOB_GROUPS
+from musicmind_ui.collection import ranked_rows, combined_timeline_rows
+from musicmind_ui.job_definitions import JOB_GROUPS, _job_label
 
 try:
     from config import DB_PATH, LASTFM_KEY
@@ -71,6 +71,30 @@ def _home_stats() -> dict[str, int]:
 class UI(rx.State):
     itunes_importing: bool = False
     itunes_result: str = ""
+    ratings_syncing: bool = False
+    ratings_result: str = ""
+
+    async def sync_musicmind_ratings(self):
+        from musicmind.itunes import sync_ratings_to_plex
+
+        self.ratings_syncing = True
+        self.ratings_result = "Syncing ratings with Plex; existing Plex ratings take priority…"
+        yield
+        try:
+            def sync():
+                from config import PLEX_URL, PLEX_TOKEN
+                from plexapi.server import PlexServer
+                return sync_ratings_to_plex(DB_PATH, PlexServer(PLEX_URL, PLEX_TOKEN))
+
+            result = await asyncio.to_thread(sync)
+            self.ratings_result = (
+                f"Plex ratings: {result['refreshed']} imported from Plex, {result['synced']} filled in Plex, "
+                f"{result['unchanged']} already up to date, {result['failed']} failed."
+            )
+        except Exception as exc:
+            self.ratings_result = f"Rating sync failed: {exc}"
+        finally:
+            self.ratings_syncing = False
 
     async def import_itunes(self, files: list[rx.UploadFile]):
         from musicmind.itunes import MAX_UPLOAD_BYTES, import_library
@@ -81,6 +105,8 @@ class UI(rx.State):
         try:
             if len(files) != 1:
                 raise ValueError("Select one library XML export.")
+            if not (files[0].filename or "").lower().endswith(".xml"):
+                raise ValueError("Select an XML library export.")
             data = await files[0].read(MAX_UPLOAD_BYTES + 1)
             result = await asyncio.to_thread(import_library, data, DB_PATH)
             self.itunes_result = (
@@ -95,7 +121,7 @@ class UI(rx.State):
                 await file.close()
             self.itunes_importing = False
 
-    theme: str = "light"
+    theme: str = rx.LocalStorage("light", name="musicmind-theme", sync=True)
     filters_open: bool = False
     filter_section: str = "Sound"
     genre_families_open: bool = False
@@ -137,7 +163,16 @@ class UI(rx.State):
     stats_request: int = 0
     stats_pages: dict[str, int] = {"artist": 0, "genre": 0, "country": 0}
     stats_rankings: dict[str, list[dict]] = {"artist": [], "genre": [], "country": []}
-    listening_rows: list[dict] = []
+    @rx.var
+    def listening_rows(self) -> list[dict]:
+        years = self.stats.get("combined_listening_by_year", [])
+        granularity = "month" if len(years) < 4 else "year"
+        return combined_timeline_rows(self.stats.get(f"combined_listening_by_{granularity}", []), granularity)
+
+    @rx.var
+    def listening_total(self) -> str:
+        return f"{self.stats.get('total_known_dated_plays', 0):,}"
+
     era_rows: list[dict] = []
     gender_rows: list[dict] = []
 
@@ -180,6 +215,12 @@ class UI(rx.State):
     selected_job_label: str = "Full sync"
     job_log: str = ""
     job_running: bool = False
+    job_state: str = "Loading status"
+    job_states: dict[str, str] = {}
+    job_errors: dict[str, str] = {}
+    pending_jobs: list[str] = []
+    resync_preview_requested: bool = False
+    resync_preview_ready: bool = False
     job_dialog_open: bool = False
     fullsync_phase: str = "Waiting to start"
     fullsync_progress: int = 0
@@ -191,7 +232,6 @@ class UI(rx.State):
     playlist_key: str = ""
     audit: dict = {}
     audit_tracks: list[dict[str, str]] = []
-    update_info: dict = {}
     guide_text: str = ""
 
     def set_prompt(self, value: str):
@@ -200,6 +240,7 @@ class UI(rx.State):
     def set_theme(self, value: str):
         if value in {"light", "parchment", "midnight", "ocean", "forest"}:
             self.theme = value
+            return rx.call_script(f"window.applyMusicMindTheme('{value}')")
 
     def toggle_filters(self):
         self.filters_open = not self.filters_open
@@ -228,9 +269,13 @@ class UI(rx.State):
 
     def set_resync_artist(self, value: str):
         self.resync_artist = value
+        self.resync_preview_ready = False
+        self.resync_preview_requested = False
 
     def set_resync_album(self, value: str):
         self.resync_album = value
+        self.resync_preview_ready = False
+        self.resync_preview_requested = False
 
     def set_resync_apply(self, value: bool):
         self.resync_apply = value
@@ -264,6 +309,8 @@ class UI(rx.State):
 
     def clear_message(self):
         self.message = ""
+        if self.theme not in {"light", "parchment", "midnight", "ocean", "forest"}:
+            self.theme = "light"
 
     def toggle_bucket(self, bucket: str, enabled: bool):
         self.buckets = ([*self.buckets, bucket] if enabled else [b for b in self.buckets if b != bucket])
@@ -403,7 +450,6 @@ class UI(rx.State):
                 "country": ranked_rows(data["by_country"], "country", "cnt"),
             }
             granularity = data.get("listening_granularity", "year")
-            listening = timeline_rows(data[f"listening_by_{granularity}"], granularity)
             self.stats = data
             self.stats_summary = summary
             self.stats_display = {key: "0" for key in summary}
@@ -414,7 +460,6 @@ class UI(rx.State):
             self.by_era = data["by_era"]
             self.era_rows = ranked_rows(data["by_era"], "era", "cnt")
             self.gender_rows = ranked_rows(data["by_gender"], "gender", "cnt")
-            self.listening_rows = listening
             self.listening_granularity = granularity
             self.stats_loaded = True
             self.stats_loading = False
@@ -489,6 +534,8 @@ class UI(rx.State):
             result = await asyncio.to_thread(jobs.status, self.selected_job)
             self.job_log = result["log"]
             self.job_running = result["running"]
+            self.job_state = self._job_result_state(result)
+            self.job_states[self.selected_job] = self.job_state
             if self.selected_job == "fullsync":
                 self.fullsync_phase = result.get("phase", "Waiting to start")
                 self.fullsync_progress = result.get("progress", 0)
@@ -496,12 +543,25 @@ class UI(rx.State):
             current = [name for name in self.running_jobs if name != self.selected_job]
             self.running_jobs = current + ([self.selected_job] if self.job_running else [])
         except Exception as exc:
+            self.job_state = "Status unavailable (last result may be stale)"
             self.message = str(exc)
+
+    @staticmethod
+    def _job_result_state(result: dict) -> str:
+        if result.get("running"):
+            return "Running"
+        if result.get("stopped"):
+            return "Stopped"
+        if result.get("exit_code") == 0:
+            return "Completed"
+        if result.get("exit_code") is not None:
+            return "Failed"
+        return "No recorded result / interrupted"
 
     async def jobs_load(self):
         names = ["fullsync"]
         names.extend(name for group, _, entries in JOB_GROUPS for name, _, _ in entries)
-        names.extend(["synapse_full", "synapse_limited"])
+        names.extend(["synapse_full", "synapse_limited", "synapse_count", "resync"])
         names.extend(jobs.GROUP_COMMANDS)
         results = await asyncio.gather(*[
             asyncio.to_thread(jobs.status, name) for name in names
@@ -511,6 +571,14 @@ class UI(rx.State):
             self.fullsync_phase = fullsync_result.get("phase", "Waiting to start")
             self.fullsync_progress = fullsync_result.get("progress", 0)
             self.fullsync_step = fullsync_result.get("step", 0)
+        for name, result in zip(names, results):
+            if isinstance(result, dict):
+                self.job_states[name] = self._job_result_state(result)
+            else:
+                self.job_states[name] = "Status unavailable (last result may be stale)"
+        if self.resync_preview_requested and self.job_states.get("resync") == "Completed":
+            self.resync_preview_ready = True
+            self.resync_preview_requested = False
         self.running_jobs = [name for name, result in zip(names, results)
                              if isinstance(result, dict) and result["running"]]
         try:
@@ -557,43 +625,59 @@ class UI(rx.State):
                                 else [*self.open_job_groups, group])
 
     async def start_job(self, name: str):
-        self.selected_job = name
-        self.selected_job_label = _job_label(name)
-        self.job_dialog_open = True
+        if name in self.pending_jobs:
+            return
+        self.pending_jobs = [*self.pending_jobs, name]
+        self.job_errors[name] = ""
         yield
         try:
             await asyncio.to_thread(jobs.start, name)
-            self.message = f"{name} started"
-            await self.job_load()
-            async for _ in self.watch_job():
-                yield
+            await self.jobs_load()
+            yield UI.poll_jobs
         except Exception as exc:
-            self.message = str(exc)
+            self.job_errors[name] = str(exc)
+        finally:
+            self.pending_jobs = [item for item in self.pending_jobs if item != name]
 
     async def stop_job(self, name: str):
-        try:
-            await asyncio.to_thread(jobs.stop, name)
-            self.message = f"{name} stopped"
-            await self.jobs_load()
-        except Exception as exc:
-            self.message = str(exc)
-
-    async def start_resync(self):
-        self.selected_job = "resync"
-        self.selected_job_label = _job_label("resync")
-        self.job_dialog_open = True
+        if name in self.pending_jobs:
+            return
+        self.pending_jobs = [*self.pending_jobs, name]
         yield
         try:
-            args = [self.resync_artist, self.resync_album]
-            if self.resync_apply:
-                args.append("--run")
-            await asyncio.to_thread(jobs.start, "resync", args)
-            self.message = "Resync started"
-            await self.job_load()
-            async for _ in self.watch_job():
-                yield
+            await asyncio.to_thread(jobs.stop, name)
+            await self.jobs_load()
         except Exception as exc:
+            self.job_errors[name] = str(exc)
             self.message = str(exc)
+        finally:
+            self.pending_jobs = [item for item in self.pending_jobs if item != name]
+
+    async def start_resync(self, apply: bool = False):
+        name = "resync"
+        if name in self.pending_jobs or name in self.running_jobs:
+            return
+        artist, album = self.resync_artist.strip(), self.resync_album.strip()
+        if not artist or not album:
+            self.job_errors[name] = "Enter both an artist and an album."
+            return
+        if apply and not self.resync_preview_ready:
+            self.job_errors[name] = "Preview these inputs before applying changes."
+            return
+        self.pending_jobs = [*self.pending_jobs, name]
+        self.job_errors[name] = ""
+        self.resync_preview_ready = False
+        self.resync_preview_requested = not apply
+        yield
+        try:
+            await asyncio.to_thread(jobs.start, name, [artist, album] + (["--run"] if apply else []))
+            await self.jobs_load()
+            yield UI.poll_jobs
+        except Exception as exc:
+            self.resync_preview_requested = False
+            self.job_errors[name] = str(exc)
+        finally:
+            self.pending_jobs = [item for item in self.pending_jobs if item != name]
 
     async def start_synapse_limited(self):
         self.selected_job = "synapse_limited"
@@ -663,12 +747,6 @@ class UI(rx.State):
     async def select_playlist(self, key: str):
         self.playlist_key = key
         await self.audit_load()
-
-    async def update_load(self):
-        try:
-            self.update_info = await asyncio.to_thread(_legacy, "GET", "/check-update")
-        except Exception as exc:
-            self.message = str(exc)
 
     async def guide_load(self):
         self.guide_text = await asyncio.to_thread(_guide)

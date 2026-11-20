@@ -26,9 +26,24 @@ def timeline_rows(rows: list[dict], granularity: str) -> list[dict]:
         plays = values.get(period)
         result.append({'period': period, 'label': datetime(year, month, 1).strftime('%B %Y')
                        if granularity == 'month' else period,
-                       'plays': plays, 'display': f'{plays:,}' if plays is not None else 'No recorded data'})
+                       'plays': plays, 'period_plays': plays,
+                       'display': f'{plays:,}' if plays is not None else 'No recorded data',
+                       'period_display': f'{plays:,}' if plays is not None else 'No recorded data'})
         if granularity == 'month' and month < 12:
             month += 1
         else:
             year, month = year + 1, 1
+    return result
+
+
+def combined_timeline_rows(rows: list[dict], granularity: str) -> list[dict]:
+    """Per-period totals and labelled contributions, never running totals."""
+    result = timeline_rows(rows, granularity)
+    by_period = {str(row[granularity]): row for row in rows}
+    for row in result:
+        recorded = by_period.get(row['period'])
+        for source in ('lastfm', 'plex', 'itunes'):
+            count = int(recorded.get(source, 0)) if recorded is not None else None
+            row[source] = count
+            row[f'{source}_display'] = f'{count:,}' if count is not None else '—'
     return result

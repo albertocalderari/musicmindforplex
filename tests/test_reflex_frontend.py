@@ -28,9 +28,10 @@ class ReflexFrontendTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_all_page_routes_are_registered(self):
         expected = {"/", "/stats", "/admin", "/synapse", "/logs", "/db",
-                    "/gaps", "/playlist-audit", "/update", "/tests", "/guide"}
+                    "/gaps", "/playlist-audit", "/tests", "/guide"}
         routes = {"/" if route == "index" else "/" + route for route in app._unevaluated_pages}
         self.assertTrue(expected.issubset(routes))
+        self.assertNotIn("/update", routes)
 
     async def test_slow_legacy_call_does_not_block_another_request(self):
         def fake_dispatch(method, path, body, content_type):

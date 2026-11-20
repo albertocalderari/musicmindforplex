@@ -1867,67 +1867,6 @@ def countries():
     return jsonify(result)
 
 
-@app.route("/update")
-def update():
-    import subprocess
-
-    # Get local git info
-    git_info = {"is_git_repo": False}
-    try:
-        commit = (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=BASE_DIR, stderr=subprocess.DEVNULL
-            )
-            .decode()
-            .strip()
-        )
-        short = commit[:7]
-        date = (
-            subprocess.check_output(
-                ["git", "log", "-1", "--format=%ci"],
-                cwd=BASE_DIR,
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()[:10]
-        )
-        message = (
-            subprocess.check_output(
-                ["git", "log", "-1", "--format=%s"],
-                cwd=BASE_DIR,
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()
-        )
-        branch = (
-            subprocess.check_output(
-                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                cwd=BASE_DIR,
-                stderr=subprocess.DEVNULL,
-            )
-            .decode()
-            .strip()
-        )
-        git_info = {
-            "is_git_repo": True,
-            "commit": short,
-            "date": date,
-            "message": message,
-            "branch": branch,
-            "path": BASE_DIR,
-        }
-    except:
-        git_info = {
-            "is_git_repo": False,
-            "path": BASE_DIR,
-        }
-
-    return render_template(
-        "update.html", git=git_info, is_master=IS_MASTER, year=datetime.now().year
-    )
-
-
 @app.route("/check-update")
 def check_update():
     import subprocess
@@ -2291,6 +2230,10 @@ def stats_data():
     listening_by_month = conn.execute(
         "SELECT strftime('%Y-%m', datetime(timestamp, 'unixepoch', 'localtime')) as month, COUNT(*) as plays FROM lastfm_scrobbles GROUP BY month ORDER BY month"
     ).fetchall()
+    from musicmind.itunes import listening_history
+    itunes_listening = listening_history(conn)
+    from musicmind.listening import combined_history
+    combined_listening = combined_history(conn)
     listening_granularity = "month" if len(listening_by_year) < 4 else "year"
 
     top_artists = conn.execute(
@@ -2382,6 +2325,14 @@ def stats_data():
             "listening_by_month": [
                 {"month": r[0], "plays": r[1]} for r in listening_by_month
             ],
+            "itunes_listening_by_year": itunes_listening['year'],
+            "itunes_listening_by_month": itunes_listening['month'],
+            "total_itunes_dated_plays": itunes_listening['total'],
+            "combined_listening_by_year": combined_listening['year'],
+            "combined_listening_by_month": combined_listening['month'],
+            "total_known_dated_plays": combined_listening['total'],
+            "listening_source_counts": combined_listening['sources'],
+            "listening_duplicates_removed": combined_listening['duplicates'],
             "listening_granularity": listening_granularity,
             "top_artists": [{"artist": r[0], "plays": r[1]} for r in top_artists],
             "top_genres": [{"tag": r[0], "cnt": r[1]} for r in top_genres],

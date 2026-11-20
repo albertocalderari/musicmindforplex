@@ -47,3 +47,43 @@ class JobGroupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JobEventTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_and_select_job_resolve_labels(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        from musicmind_ui.state import UI
+
+        async def watch_job():
+            if False:
+                yield
+
+        for name, label in [('ingest', 'Sync Plex Library'), ('lastfm', 'Sync Last.fm')]:
+            state = SimpleNamespace(job_load=AsyncMock(), watch_job=watch_job)
+            with patch.object(jobs, 'start') as start:
+                async for _ in UI.start_job.fn(state, name):
+                    pass
+                start.assert_called_once_with(name)
+            self.assertEqual(state.selected_job_label, label)
+            self.assertTrue(state.job_dialog_open)
+            async for _ in UI.select_job.fn(state, name):
+                pass
+            self.assertEqual(state.selected_job_label, label)
+
+
+class JobLabelStateTests(unittest.IsolatedAsyncioTestCase):
+    async def test_job_dialog_handlers_resolve_labels_before_starting_work(self):
+        from musicmind_ui.state import UI
+        for handler, args, label in [
+            ('start_job', ('ingest',), 'Sync Plex Library'),
+            ('select_job', ('synapse_full',), 'Synapse audio analysis'),
+            ('start_resync', (), 'Resync'),
+            ('start_synapse_limited', (), 'Limited Synapse analysis'),
+        ]:
+            state = UI(_reflex_internal_init=True)
+            events = getattr(state, handler)(*args)
+            await anext(events)
+            self.assertTrue(state.job_dialog_open)
+            self.assertEqual(state.selected_job_label, label)
+            await events.aclose()

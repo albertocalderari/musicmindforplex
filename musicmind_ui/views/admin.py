@@ -3,22 +3,14 @@
 from random import Random
 
 import reflex as rx
-from musicmind_ui.job_definitions import JOB_GROUPS, JOB_LABELS
+from musicmind_ui.job_definitions import JOB_GROUPS
 from musicmind_ui.state import LASTFM_KEY, UI
 from .components import panel, shell
 
 
-def _job_label(name: str) -> str:
-    labels = dict(JOB_LABELS)
-    labels["synapse_full"] = "Synapse audio analysis"
-    labels["synapse_limited"] = "Limited Synapse analysis"
-    labels["synapse_count"] = "Synapse track count"
-    labels["synapse_estimate"] = "Synapse time estimate"
-    return labels.get(name, name.replace("_", " ").title())
-
 
 def synapse_running_indicator():
-    active = UI.running_jobs.contains("synapse_full")
+    active = UI.running_jobs.contains("synapse_full") | UI.running_jobs.contains("synapse_limited")
     return rx.box(
         rx.cond(
             active,
@@ -33,6 +25,7 @@ def synapse_running_indicator():
 def fullsync_blocked():
     return (
         UI.running_jobs.contains("ingest")
+        | UI.running_jobs.contains("plex_history")
         | UI.running_jobs.contains("fingerprint")
         | UI.running_jobs.contains("copyforward")
         | UI.running_jobs.contains("varesolve")
@@ -59,8 +52,7 @@ def job_status_dialog():
                        rx.text("Live job status and recent output.", class_name="job-dialog-hint"),
                        class_name="job-dialog-heading"),
                 rx.hstack(
-                    rx.cond(UI.job_running, rx.badge("Running", color_scheme="green"),
-                            rx.badge("Idle")),
+                    rx.badge(UI.job_state, role="status"),
                     rx.cond(UI.job_running,
                             rx.button("Stop", on_click=UI.stop_job(UI.selected_job), color_scheme="red"),
                             rx.fragment()),
@@ -68,7 +60,7 @@ def job_status_dialog():
                     rx.button("Close", on_click=UI.set_job_dialog_open(False), variant="outline"),
                     class_name="job-dialog-actions"),
                 justify="between", align="start", class_name="job-dialog-header"),
-            rx.cond(UI.selected_job == "fullsync",
+            rx.cond((UI.selected_job == "fullsync") & UI.job_running,
                     rx.box(rx.text(UI.fullsync_phase, class_name="job-dialog-phase"),
                            rx.progress(value=UI.fullsync_progress, max=100, size="2",
                                        class_name="fullsync-progress"),
@@ -122,158 +114,115 @@ def synapse_network_svg() -> str:
     )
 
 
+def job_entry(name, label, detail, group="Library"):
+    blocked = UI.running_jobs.contains(f"group_{group.lower()}") | UI.running_jobs.contains("fullsync")
+    return rx.box(
+        rx.box(rx.text(label, class_name="job-name"), rx.text(detail, class_name="job-description"),
+               rx.text(UI.job_errors.get(name, ""), role="status", class_name="admin-feedback"), class_name="job-copy"),
+        rx.hstack(rx.badge(UI.job_states.get(name, "Loading status")),
+                  rx.button("Run task", on_click=UI.start_job(name),
+                            disabled=blocked | UI.running_jobs.contains(name) | UI.pending_jobs.contains(name),
+                            loading=UI.pending_jobs.contains(name)),
+                  rx.button("View details", on_click=UI.select_job(name), variant="outline"),
+                  class_name="job-actions"),
+        rx.cond(blocked, rx.text("Full sync or this task group is running.", class_name="admin-feedback"), rx.fragment()),
+        class_name="job-entry")
+
+
 def admin_page():
-    return shell("Back Office", "Run maintenance and follow each job's output.",
-                 rx.box(
-                     rx.hstack(
-                         rx.box(rx.text("MUSICMIND / ADMIN", class_name="admin-eyebrow"),
-                                rx.text("A little order in the noise.", class_name="admin-signature")),
-                         justify="between", align="center", class_name="admin-utility-header"),
+    all_jobs = [("fullsync", "Full sync"), ("synapse_full", "Audio analysis"),
+                ("synapse_limited", "Limited audio analysis"), ("synapse_count", "Count tracks"),
+                ("resync", "Album refresh")]
+    all_jobs += [(name, label) for _, _, items in JOB_GROUPS for name, label, _ in items]
+    all_jobs += [(f"group_{group.lower()}", group + " tasks") for group, _, _ in JOB_GROUPS]
+    return shell("Admin", "", rx.box(
+        rx.box(rx.heading("Admin", as_="h1", class_name="admin-page-title"),
+               rx.text("Sync your library, manage metadata, and follow background jobs."),
+               rx.hstack(*[rx.link(label, href=f"#{anchor}") for label, anchor in [
+                   ("Overview", "overview"), ("Library Operations", "library-operations"),
+                   ("Library tools", "library-tools"), ("Data transfers", "data-transfers"),
+                   ("Advanced tasks", "advanced-tasks")]], class_name="admin-local-nav"),
+               id="overview", class_name="admin-intro"),
+        rx.box(rx.hstack(rx.icon("activity", size=16, aria_hidden="true"),
+                         rx.heading("Activity", as_="h2", size="3"),
+                         rx.cond(UI.running_jobs.length() == 0,
+                                 rx.text("No jobs running", class_name="admin-activity-summary"),
+                                 rx.text(UI.running_jobs.length().to_string() + " jobs running",
+                                         class_name="admin-activity-summary")),
+                         class_name="admin-activity-heading"),
+               *[rx.cond(UI.running_jobs.contains(name),
+                         rx.hstack(rx.text(label), rx.badge("Running"),
+                                   rx.button("View details", on_click=UI.select_job(name), variant="outline"),
+                                   class_name="admin-activity-row"), rx.fragment()) for name, label in all_jobs],
+               class_name="admin-activity", role="status"),
+        rx.text("KEEP YOUR LIBRARY CURRENT", class_name="section-kicker"),
+        panel("Full sync", rx.text("Scans Plex folders and waits for the scan to finish, then refreshes the Plex index, listening history, metadata, tags, and audio analysis.", class_name="fullsync-description"),
+              rx.badge(UI.job_states.get("fullsync", "Loading status")),
+              rx.cond(UI.running_jobs.contains("fullsync"), rx.box(rx.text(UI.fullsync_phase),
+                      rx.progress(value=UI.fullsync_progress, max=100, class_name="fullsync-progress"),
+                      rx.text("Stage " + UI.fullsync_step.to_string() + " of 12")), rx.fragment()),
+              rx.cond(fullsync_blocked(), rx.text("Another pipeline job is active. Full sync can start when it finishes.", class_name="admin-feedback"), rx.fragment()),
+              rx.text(UI.job_errors.get("fullsync", ""), role="status", class_name="admin-feedback"),
+              rx.hstack(rx.button("Start full sync", on_click=UI.start_job("fullsync"),
+                                  disabled=UI.running_jobs.contains("fullsync") | fullsync_blocked() | UI.pending_jobs.contains("fullsync"),
+                                  loading=UI.pending_jobs.contains("fullsync")),
+                        rx.button("View details", on_click=UI.select_job("fullsync"), variant="outline"), class_name="fullsync-actions"), class_name="panel fullsync-tracker"),
+        rx.el.details(rx.el.summary(
+                          rx.heading("Library Operations", as_="h2", size="4"),
+                          rx.icon("chevron-down", size=20, class_name="library-operations-chevron",
+                                  aria_hidden="true")),
+                      rx.box(*[job_entry(name, label, detail) for group, _, items in JOB_GROUPS if group == "Library"
+                               for name, label, detail in items if LASTFM_KEY or name != "lastfm"], class_name="job-list"),
+                      rx.cond(not bool(LASTFM_KEY), rx.text("Last.fm sync is unavailable until the integration is configured."), rx.fragment()),
+                      id="library-operations", class_name="job-group admin-section"),
+        rx.box(rx.heading("Library tools", as_="h2", size="5"),
+               rx.box(panel("Scan Plex folders", rx.text("Request file discovery in Plex. Sync Plex library imports the current Plex index."),
+                            rx.button("Scan Plex folders", on_click=UI.scan_plex, variant="outline")),
+                      panel("Refresh an album", rx.text("Preview a refresh for one artist and album."),
+                            rx.box(rx.box(rx.text("Artist", as_="label", html_for="resync-artist"), rx.input(id="resync-artist", value=UI.resync_artist, on_change=UI.set_resync_artist)),
+                                   rx.box(rx.text("Album", as_="label", html_for="resync-album"), rx.input(id="resync-album", value=UI.resync_album, on_change=UI.set_resync_album)), class_name="admin-resync-fields"),
+                            rx.hstack(rx.button("Preview changes", on_click=UI.start_resync(False), disabled=UI.pending_jobs.contains("resync") | UI.running_jobs.contains("resync")),
+                                      rx.cond(UI.resync_preview_ready, rx.button("Apply changes", on_click=UI.start_resync(True)), rx.fragment()),
+                                      rx.button("View preview log", on_click=UI.select_job("resync"), variant="outline"), class_name="admin-resync-actions"),
+                            rx.text("The preview log is not an atomic snapshot; the result may change before applying."),
+                            rx.text(UI.job_states.get("resync", "")), rx.text(UI.job_errors.get("resync", ""), role="status")),
+                      class_name="admin-library-tools"),
+               rx.box(panel("Synapse audio analysis",
                      rx.box(
-                         rx.box(
-                             rx.box(rx.icon("folder-sync", size=22), class_name="admin-tool-icon"),
-                             rx.box(rx.heading("Find new music", size="4"),
-                                    rx.text("Ask Plex to look for new or changed files in your music folders.",
-                                            class_name="admin-tool-copy"),
-                                    rx.text("Then run Full sync below to bring those changes into MusicMind.",
-                                            class_name="admin-tool-note"),
-                                    rx.button("Scan Plex folders", rx.icon("arrow-up-right", size=15),
-                                              on_click=UI.scan_plex, variant="outline"),
-                                    class_name="admin-tool-body"),
-                             class_name="admin-library-tool"),
-                         rx.box(
-                             rx.box(rx.icon("refresh-cw", size=22), class_name="admin-tool-icon"),
-                             rx.box(rx.heading("Refresh a specific release", size="4"),
-                                    rx.text("Recheck one artist or album without refreshing the whole library.",
-                                            class_name="admin-tool-copy"),
-                                    rx.box(
-                                        rx.box(rx.text("Artist", as_="label", html_for="resync-artist"),
-                                               rx.input(id="resync-artist", value=UI.resync_artist,
-                                                        on_change=UI.set_resync_artist, placeholder="Artist name")),
-                                        rx.box(rx.text("Album", as_="label", html_for="resync-album"),
-                                               rx.input(id="resync-album", value=UI.resync_album,
-                                                        on_change=UI.set_resync_album, placeholder="Album title")),
-                                        class_name="admin-resync-fields"),
-                                    rx.hstack(
-                                        rx.checkbox("Apply changes", checked=UI.resync_apply,
-                                                    on_change=UI.set_resync_apply),
-                                        rx.button(rx.cond(UI.resync_apply, "Refresh release", "Preview changes"),
-                                                  on_click=UI.start_resync,
-                                                  disabled=(UI.resync_artist == "") | (UI.resync_album == "")),
-                                        justify="between", align="center", class_name="admin-resync-actions"),
-                                    rx.text("Preview shows what will change before you apply it.",
-                                            class_name="admin-tool-note"),
-                                    class_name="admin-tool-body"),
-                             class_name="admin-library-tool"),
-                         class_name="admin-library-tools"),
-                     class_name="admin-workspace"),
-                 rx.text("LIBRARY OPERATIONS", class_name="section-kicker"),
-                 panel("Import iTunes listening history",
-                       rx.text("In iTunes or Apple Music, choose File → Library → Export Library and select the XML file (up to 50 MiB). Counts and last-played dates are imported."),
-                       rx.text("iTunes exports lack individual play timestamps, so imported history won’t populate date-based timelines."),
-                       rx.text("Matching uses artist, title and album. The higher play count is kept to avoid counting overlapping Last.fm plays twice."),
-                       rx.upload(rx.text("Choose or drop a library XML file"),
-                                 id="itunes-library", multiple=False, max_files=1,
-                                 max_size=50 * 1024 * 1024,
-                                 accept={"text/xml": [".xml"], "application/xml": [".xml"]},
-                                 disabled=UI.itunes_importing),
-                       rx.foreach(rx.selected_files("itunes-library"), lambda name: rx.text(name)),
-                       rx.button("Import history", loading=UI.itunes_importing,
-                                 on_click=UI.import_itunes(rx.upload_files(upload_id="itunes-library"))),
-                       rx.text(UI.itunes_result, role="status")),
-                 rx.heading("Keep your collection in tune", class_name="admin-operations-title"),
-                 rx.text("Run the complete pipeline, analyze audio, or choose an individual task below.",
-                         class_name="admin-operations-copy"),
-                 panel("Full sync",
-                       rx.text("Refresh the Plex index, listening history, metadata, tags, and audio analysis.",
-                               class_name="fullsync-description"),
-                       rx.hstack(
-                           rx.cond(UI.running_jobs.contains("fullsync"),
-                                   rx.badge("Running", color_scheme="green"),
-                                   rx.badge("Idle")),
-                           rx.text(UI.fullsync_phase, class_name="fullsync-phase"),
-                           class_name="fullsync-status-row"),
-                       rx.progress(value=UI.fullsync_progress, max=100, size="2",
-                                   class_name="fullsync-progress"),
-                       rx.text(UI.fullsync_step.to_string() + " of 12 stages",
-                               class_name="fullsync-progress-label"),
-                       rx.cond(fullsync_blocked(),
-                               rx.text("Another pipeline job is active. Full sync can start when it finishes.",
-                                       class_name="fullsync-blocked-note"),
-                               rx.fragment()),
-                       rx.hstack(
-                           rx.button("Start full sync", on_click=UI.start_job("fullsync"),
-                                     disabled=UI.running_jobs.contains("fullsync") | fullsync_blocked()),
-                           rx.button("Status", on_click=UI.select_job("fullsync"), variant="outline"),
-                           rx.cond(UI.running_jobs.contains("fullsync"),
-                                   rx.button("Stop", on_click=UI.stop_job("fullsync"), color_scheme="red"),
-                                   rx.fragment()),
-                           class_name="fullsync-actions"),
-                       class_name="panel fullsync-tracker"),
-                 rx.el.div(id="synapse", class_name="admin-section-anchor"),
-                 panel("Synapse audio analysis",
-                       rx.box(
-                           rx.box(synapse_running_indicator(),
-                                  rx.text("Measure tempo, key, and vocal features across your tracks.",
-                                          class_name="synapse-summary"),
-                                  rx.hstack(
-                                      rx.box(rx.text("ANALYZED", class_name="synapse-metric-label"),
-                                             rx.text(UI.synapse.get("analyzed", 0).to_string(), class_name="synapse-metric-value"),
-                                             class_name="synapse-metric"),
-                                      rx.box(rx.text("ERRORS", class_name="synapse-metric-label"),
-                                             rx.text(UI.synapse.get("errors", 0).to_string(), class_name="synapse-metric-value"),
-                                             class_name="synapse-metric error-metric"),
-                                      class_name="synapse-metrics"),
-                                  rx.hstack(rx.button("Start analysis", on_click=UI.start_job("synapse_full")),
-                                            rx.button("Count tracks", on_click=UI.start_job("synapse_count"), variant="outline"),
-                                            rx.button("Status", on_click=UI.select_job("synapse_full"), variant="outline"),
-                                            class_name="synapse-admin-actions"),
-                                  class_name="synapse-admin-main"),
-                           rx.box(rx.html(synapse_network_svg()),
-                                  class_name=rx.cond(UI.running_jobs.contains("synapse_full") |
-                                                     UI.running_jobs.contains("synapse_limited"),
-                                                     "synapse-neuron is-active", "synapse-neuron"),
-                                  aria_hidden="true"),
-                           class_name="synapse-admin-layout"),
-                       class_name="panel synapse-admin-panel"),
-                 rx.text("INDIVIDUAL TASKS", class_name="section-kicker admin-tasks-kicker"),
-                 rx.box(*[
-                     rx.el.details(rx.el.summary(rx.hstack(
-                                rx.box(rx.heading(group, size="4", class_name="job-group-title"),
-                                       rx.text(description, class_name="job-group-description"),
-                                       class_name="job-group-intro"),
+                         rx.box(synapse_running_indicator(),
+                                rx.text("Measure tempo, key, and vocal features across your tracks.", class_name="synapse-summary"),
                                 rx.hstack(
-                                    rx.cond(UI.running_jobs.contains(f"group_{group.lower()}"),
-                                            rx.badge("Running", color_scheme="green"),
-                                            rx.fragment()),
-                                    rx.button("Run all", on_click=UI.start_job(f"group_{group.lower()}"),
-                                              disabled=UI.running_jobs.contains(f"group_{group.lower()}") |
-                                              UI.running_jobs.contains("fullsync")),
-                                    rx.box(rx.icon("chevron-down", size=18),
-                                           class_name="job-group-toggle", aria_hidden="true"),
-                                    class_name="job-group-controls"),
-                                class_name="job-group-header", justify="between", align="center")),
-                            rx.box(*[
-                                rx.box(rx.box(rx.text(label, class_name="job-name"),
-                                              rx.text(detail, class_name="job-description"),
-                                              class_name="job-copy"),
-                                       rx.hstack(
-                                           rx.cond(UI.running_jobs.contains(name),
-                                                   rx.badge("Running", color_scheme="green",
-                                                            class_name="job-running-badge"),
-                                                   rx.badge("Idle", class_name="job-idle-badge")),
-                                           rx.button("Run", on_click=UI.start_job(name),
-                                                     disabled=UI.running_jobs.contains(f"group_{group.lower()}") |
-                                                     UI.running_jobs.contains("fullsync")),
-                                           rx.button("Status", on_click=UI.select_job(name), variant="outline"),
-                                           class_name="job-actions"),
-                                       class_name="job-entry")
-                                for name, label, detail in items
-                                if LASTFM_KEY or name != "lastfm"],
-                                  class_name="job-list", id=f"{group.lower()}-job-list"),
-                            class_name="job-group")
-                     for group, description, items in JOB_GROUPS],
-                     class_name="job-groups"),
-                 job_status_dialog())
-
-
+                                    rx.box(rx.text("ANALYZED TRACKS", class_name="synapse-metric-label"),
+                                           rx.text(UI.synapse.get("analyzed", "Unavailable").to_string(), class_name="synapse-metric-value"), class_name="synapse-metric"),
+                                    rx.box(rx.text("ERRORS", class_name="synapse-metric-label"),
+                                           rx.text(UI.synapse.get("errors", "Unavailable").to_string(), class_name="synapse-metric-value"), class_name="synapse-metric error-metric"),
+                                    class_name="synapse-metrics"),
+                                rx.hstack(rx.button("Start analysis", on_click=UI.start_job("synapse_full"), disabled=UI.pending_jobs.contains("synapse_full") | UI.running_jobs.contains("synapse_full")),
+                                          rx.button("Count tracks", on_click=UI.start_job("synapse_count"), disabled=UI.pending_jobs.contains("synapse_count") | UI.running_jobs.contains("synapse_count"), variant="outline"),
+                                          rx.button("View details", on_click=UI.select_job("synapse_full"), variant="outline"), class_name="synapse-admin-actions"),
+                                rx.text(UI.job_errors.get("synapse_full", ""), role="status"),
+                                rx.text(UI.job_errors.get("synapse_count", ""), role="status"), class_name="synapse-admin-main"),
+                         rx.box(rx.html(synapse_network_svg()),
+                                class_name=rx.cond(UI.running_jobs.contains("synapse_full") | UI.running_jobs.contains("synapse_limited"), "synapse-neuron is-active", "synapse-neuron"),
+                                aria_hidden="true"), class_name="synapse-admin-layout"),
+                     class_name="panel synapse-admin-panel"), id="synapse"),
+               id="library-tools", class_name="admin-section"),
+        rx.box(rx.heading("Data transfers", as_="h2", size="5"),
+               panel("Import Apple Music / iTunes history", rx.text("Import an XML library export into MusicMind. Existing ratings are preserved and the higher play count is retained."),
+                     rx.text("Known last-played dates can contribute to timelines; the export does not contain the complete sequence of historical plays."),
+                     rx.upload(rx.text("Choose or drop an XML file · maximum 50 MiB"),
+                               rx.text("In Apple Music or iTunes, choose File → Library → Export Library and select the XML file. Aggregate counts are not distributed across invented dates."), id="itunes-library", class_name="itunes-dropzone", multiple=False, max_files=1, max_size=50 * 1024 * 1024, accept={"text/xml": [".xml"], "application/xml": [".xml"]}, disabled=UI.itunes_importing),
+                     rx.foreach(rx.selected_files("itunes-library"), lambda name: rx.text(name)),
+                     rx.button("Import history", loading=UI.itunes_importing, disabled=(rx.selected_files("itunes-library").length() == 0) | UI.itunes_importing, on_click=UI.import_itunes(rx.upload_files(upload_id="itunes-library"))),
+                     rx.text(UI.itunes_result, role="status")),
+               panel("Sync star ratings with Plex", rx.text("Existing Plex ratings take priority and update MusicMind. MusicMind ratings fill only unrated tracks in Plex."),
+                     rx.button("Sync star ratings", on_click=UI.sync_musicmind_ratings, loading=UI.ratings_syncing, disabled=UI.ratings_syncing), rx.text(UI.ratings_result, role="status")),
+               id="data-transfers", class_name="admin-section"),
+        rx.box(rx.heading("Advanced tasks", as_="h2", size="5"),
+               rx.box(*[rx.el.details(rx.el.summary(rx.hstack(rx.box(rx.heading(group, size="4", class_name="job-group-title"), rx.text(description, class_name="job-group-description"), rx.text(f"{len(items)} tasks", class_name="job-group-description")), rx.icon("chevron-down", size=18), justify="between", class_name="job-group-header")),
+                          rx.box(rx.text("Runs the tasks below in order."),
+                                 rx.button("Run all tasks in this group", on_click=UI.start_job(f"group_{group.lower()}"), disabled=UI.running_jobs.contains(f"group_{group.lower()}") | UI.running_jobs.contains("fullsync") | UI.pending_jobs.contains(f"group_{group.lower()}")),
+                                 rx.text(UI.job_errors.get(f"group_{group.lower()}", ""), role="status"),
+                                 *[job_entry(name, label, detail, group) for name, label, detail in items], class_name="job-list"), class_name="job-group") for group, description, items in JOB_GROUPS if group != "Library"], class_name="job-groups"),
+               id="advanced-tasks", class_name="admin-section"),
+        job_status_dialog(), class_name="admin-workspace"))

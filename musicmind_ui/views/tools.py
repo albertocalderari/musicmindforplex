@@ -81,12 +81,6 @@ def audit_page():
                      rx.text("Select a playlist to inspect its tracks and audio analysis.", class_name="audit-caption")))
 
 
-def update_page():
-    return shell("Update", "Check whether a newer MusicMind release is available.",
-                 panel("Repository status", rx.button("Check for updates", on_click=UI.update_load),
-                       rx.code_block(UI.update_info.to_string(), language="json")))
-
-
 def tests_page():
     return shell("Tests", "Check library integrity and enrichment results.",
                  panel("Script tests", rx.box(*[
