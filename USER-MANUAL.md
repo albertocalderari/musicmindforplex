@@ -512,3 +512,19 @@ MusicMind and fill only unrated Plex tracks from MusicMind. A rating corrected i
 Plex replaces the database rating, never the other way around. The result reports
 ratings imported from Plex, filled in Plex, unchanged, and failed tracks.
 Reimport your XML if it was uploaded before star-rating support was added.
+
+### Synapse reports missing TensorflowPredictMusiCNN or semaphore leaks
+
+Voice/instrumental analysis requires an Essentia build exposing
+`TensorflowPredictMusiCNN`; installed `essentia-tensorflow` package metadata alone
+is insufficient if another Essentia installation has replaced the shared module.
+MusicMind probes the worker interpreter before enabling VI and skips VI when the
+algorithm cannot load. Tempo/key analysis can continue independently. Repair the
+TensorFlow-enabled Essentia installation for your Python version and architecture
+before retrying VI; the separate `tensorflow` package does not add this algorithm
+to a slim Essentia build.
+
+Analysis workers now close their process and queue resources on success, crashes,
+timeouts, and interruption. Restart an existing analysis job to use these fixes.
+Successful analysis is retained. Audio file read errors and mount timeouts still
+require checking that the music volume and affected files are readable.

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # MusicMind for Plex — Dockerfile
 #
 # Two variants via a build arg, not two separate Dockerfiles (avoids
@@ -31,15 +32,17 @@
 # is a reasonable future improvement once this base path is proven.
 
 FROM node:24-slim AS node
+FROM ghcr.io/astral-sh/uv:0.9.8 AS uv
 
 FROM python:3.14-slim
 
 COPY --from=node /usr/local/ /usr/local/
 
-ARG VARIANT=slim
-ENV MUSICMIND_VARIANT=${VARIANT}
 ENV REFLEX_USE_NPM=1
 ENV REFLEX_DIR=/app/.reflex
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+ENV UV_LINK_MODE=copy
+ENV PATH="/opt/venv/bin:${PATH}"
 
 # System dependencies:
 #   ffmpeg   — transcode fallback for files fpcalc/essentia can't
@@ -71,16 +74,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# App code and package metadata
-COPY . .
+# Resolve and install third-party packages before copying the application.
+# Keep the base layers shared between variants.
+COPY --from=uv /uv /usr/local/bin/uv
+COPY pyproject.toml uv.lock ./
+ARG VARIANT=slim
+ENV MUSICMIND_VARIANT=${VARIANT}
+RUN --mount=type=cache,target=/root/.cache/uv \
+    case "$VARIANT" in slim|full) ;; *) echo "Unknown variant: $VARIANT" >&2; exit 1 ;; esac \
+    && uv sync --locked --no-dev --no-install-project --extra "$VARIANT"
 
-# The optional dependency group selects the audio engine for this image.
-RUN case "$VARIANT" in slim|full) ;; *) echo "Unknown variant: $VARIANT" >&2; exit 1 ;; esac \
-    && pip install --no-cache-dir ".[${VARIANT}]"
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable --extra "$VARIANT"
 
 # Build the Reflex frontend while no credentials are present. At runtime the
 # entrypoint writes config.py before starting the single-port ASGI server.
-RUN reflex export --no-zip --no-ssr
+RUN --mount=type=cache,target=/root/.npm \
+    reflex export --no-zip --no-ssr
 
 # bin/fpcalc is a real, committed binary (statically-linked x86-64
 # Linux, verified — no glibc compatibility concerns on this base

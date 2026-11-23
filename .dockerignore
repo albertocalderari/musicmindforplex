@@ -4,7 +4,9 @@ config.py
 *.db
 *.db-wal
 *.db-shm
-*.log
+**/*.log
+# Job output and PID/result files are created at runtime.
+job_logs/
 
 # Licensed model file — deliberately never bundled, downloaded at
 # runtime instead (see docker-entrypoint.sh)
@@ -16,6 +18,10 @@ models/
 
 # Python
 .venv/
+.web/
+.reflex/
+.states/
+.coverage
 *.egg-info/
 build/
 dist/

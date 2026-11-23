@@ -85,11 +85,20 @@ REFERENCE_FLAC_SECONDS = 22.3
 # a real, confirmed regression avoided by keeping two loads.
 VI_MODEL = str(MODELS_DIR / "voice_instrumental-musicnn-msd-1.pb")
 VI_THRESHOLD = 0.55
+MAX_ANALYSIS_AUDIO_SECONDS = 10 * 60
 
 
-def _load_audio_with_transcode_fallback(filepath, sample_rate, MonoLoader):
+def _load_analysis_audio(filepath, sample_rate, es):
+    # EasyLoader trims the stream before collecting samples. Its default
+    # replay gain gives unity scaling, matching MonoLoader's signal level.
+    return es.EasyLoader(
+        filename=filepath, sampleRate=sample_rate, endTime=MAX_ANALYSIS_AUDIO_SECONDS
+    )()
+
+
+def _load_audio_with_transcode_fallback(filepath, sample_rate, es):
     """Try loading directly first (fast, works for the vast majority of
-    files). If essentia's MonoLoader fails, transcode through ffmpeg
+    files). If Essentia cannot load the bounded clip, transcode through ffmpeg
     to a clean temp copy and retry once before giving up -- the exact
     same proven pattern from fingerprint_tracks.py's
     run_fpcalc_with_transcode_fallback(), confirmed there to recover
@@ -110,7 +119,7 @@ def _load_audio_with_transcode_fallback(filepath, sample_rate, MonoLoader):
     import shutil, subprocess, tempfile
 
     try:
-        return MonoLoader(filename=filepath, sampleRate=sample_rate)(), False
+        return _load_analysis_audio(filepath, sample_rate, es), False
     except Exception as first_err:
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
@@ -130,6 +139,8 @@ def _load_audio_with_transcode_fallback(filepath, sample_rate, MonoLoader):
                     "ignore_err",
                     "-i",
                     filepath,
+                    "-t",
+                    str(MAX_ANALYSIS_AUDIO_SECONDS),
                     "-acodec",
                     "libmp3lame",
                     "-q:a",
@@ -150,7 +161,7 @@ def _load_audio_with_transcode_fallback(filepath, sample_rate, MonoLoader):
                     f"{first_err} (transcode fallback also failed: {stderr_tail})"
                 )
             try:
-                return MonoLoader(filename=tmp_path, sampleRate=sample_rate)(), True
+                return _load_analysis_audio(tmp_path, sample_rate, es), True
             except Exception as retry_err:
                 raise RuntimeError(
                     f"{first_err} (transcode succeeded but retry still failed: {retry_err})"
@@ -164,12 +175,20 @@ def vi_model_available():
     """VI needs both the model and Essentia's TensorFlow-enabled build."""
     if not os.path.exists(VI_MODEL):
         return False
-    from importlib.metadata import PackageNotFoundError, version
+    # Probe the actual worker interpreter, not distribution metadata: slim
+    # Essentia can overwrite the shared module while tensorflow metadata remains.
+    # Keep native TensorFlow initialization out of the long-lived parent.
+    import subprocess
+
     try:
-        version("essentia-tensorflow")
-    except PackageNotFoundError:
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "from essentia.standard import TensorflowPredictMusiCNN"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return False
-    return True
+    return probe.returncode == 0
 
 
 def init_table(conn):
@@ -257,17 +276,8 @@ ANALYSIS_TIMEOUT_SECONDS = 90  # floor for normal-length tracks —
 # Found July 2026: real, legitimate long tracks exist (Hendrix's
 # "Machine Gun" ~22min, Velvet Underground's "Sister Ray" ~17min,
 # King Crimson prog epics, extended ragas/qawwali, Dan Gibson ambient
-# pieces up to ~30min) alongside genuinely bad data (a "track" that
-# turned out to be a 26-HOUR mislabeled album). Both analyses process
-# the whole waveform, so real analysis time scales roughly linearly
-# with duration -- a fixed 90s floor that's generous for a 4-minute
-# track isn't necessarily enough for a legitimate 20-minute one.
-# get_timeout_for_duration() scales the timeout to the track's real
-# length, but caps it -- so genuine long tracks get proportionally
-# more time and should now actually succeed, while clearly malformed
-# data (the 26-hour case) still eventually times out and gets
-# correctly flagged as an error worth investigating, rather than
-# being given effectively unlimited patience and stalling a run.
+# pieces up to ~30min). Longer tracks get more time for decoding and
+# analysis, up to a hard wall-clock limit separate from the audio cap.
 ANALYSIS_TIMEOUT_SECONDS_PER_MINUTE = 10  # real headroom above the
 # observed ~4-8s/min baseline
 ANALYSIS_TIMEOUT_CAP_SECONDS = 600  # 10 minutes -- generous enough for
@@ -294,6 +304,28 @@ def get_timeout_for_duration(duration_ms):
 # titled "[silence]" all produced an identical bogus 738 BPM reading.
 MIN_REALISTIC_BPM = 40
 MAX_REALISTIC_BPM = 250
+
+
+def _extract_synapse_features(filepath, es):
+    """Keep waveform and extractor lifetimes separate from VI inference."""
+    audio = _load_analysis_audio(filepath, 44100, es)
+    bpm, _, _, _, _ = es.RhythmExtractor2013(method="multifeature")(audio)
+    if not (MIN_REALISTIC_BPM <= bpm <= MAX_REALISTIC_BPM):
+        raise ValueError(
+            f"Implausible BPM ({bpm:.1f}) — likely no rhythmic content "
+            f"in this file (e.g. silence, noise, spoken word). Flagged "
+            f"for manual review rather than stored as valid data."
+        )
+
+    key, scale, key_strength = es.KeyExtractor()(audio)
+    dance_value, _ = es.Danceability()(audio)
+    return {
+        "bpm": float(bpm),
+        "key": key,
+        "scale": scale,
+        "key_strength": float(key_strength),
+        "danceability": float(dance_value),
+    }
 
 
 def _analyze_one_impl(filepath, result_queue, needs_synapse, needs_vi):
@@ -324,41 +356,14 @@ def _analyze_one_impl(filepath, result_queue, needs_synapse, needs_vi):
 
     if needs_synapse:
         try:
-            audio = es.MonoLoader(filename=filepath)()
-
-            rhythm_extractor = es.RhythmExtractor2013(method="multifeature")
-            bpm, beats, beats_confidence, _, beats_intervals = rhythm_extractor(audio)
-
-            if not (MIN_REALISTIC_BPM <= bpm <= MAX_REALISTIC_BPM):
-                raise ValueError(
-                    f"Implausible BPM ({bpm:.1f}) — likely no rhythmic content "
-                    f"in this file (e.g. silence, noise, spoken word). Flagged "
-                    f"for manual review rather than stored as valid data."
-                )
-
-            key_extractor = es.KeyExtractor()
-            key, scale, key_strength = key_extractor(audio)
-
-            danceability_extractor = es.Danceability()
-            dance_value, dance_dfa = danceability_extractor(audio)
-
-            result["synapse"] = (
-                "ok",
-                {
-                    "bpm": float(bpm),
-                    "key": key,
-                    "scale": scale,
-                    "key_strength": float(key_strength),
-                    "danceability": float(dance_value),
-                },
-            )
+            result["synapse"] = ("ok", _extract_synapse_features(filepath, es))
         except Exception as e:
             result["synapse"] = ("error", str(e))
 
     if needs_vi:
         try:
             import numpy as np
-            from essentia.standard import MonoLoader, TensorflowPredictMusiCNN
+            from essentia.standard import TensorflowPredictMusiCNN
 
             # Deliberately a SEPARATE decode at VI's own required rate
             # (16000Hz) -- confirmed via direct testing that sharing a
@@ -366,10 +371,11 @@ def _analyze_one_impl(filepath, result_queue, needs_synapse, needs_vi):
             # degrades their accuracy. Small redundant cost, real
             # accuracy protected.
             vi_audio, _used_fallback = _load_audio_with_transcode_fallback(
-                filepath, 16000, MonoLoader
+                filepath, 16000, es
             )
+            # Smaller batches reduce peak activation memory on CPU.
             model = TensorflowPredictMusiCNN(
-                graphFilename=VI_MODEL, output="model/Sigmoid"
+                graphFilename=VI_MODEL, output="model/Sigmoid", batchSize=8
             )
             preds = np.atleast_2d(model(vi_audio))
             if preds.size == 0:
@@ -401,32 +407,42 @@ def analyze_one(
     """
     import multiprocessing
 
+    from queue import Empty
+
     result_queue = multiprocessing.Queue()
     proc = multiprocessing.Process(
         target=_analyze_one_impl, args=(filepath, result_queue, needs_synapse, needs_vi)
     )
-    proc.start()
-    proc.join(timeout=timeout)
 
-    if proc.is_alive():
-        proc.terminate()
-        proc.join(timeout=5)
+    def failed(message):
+        return {
+            "synapse": ("error", message) if needs_synapse else None,
+            "vi": ("error", message) if needs_vi else None,
+        }
+
+    started = False
+    try:
+        proc.start()
+        started = True
+        proc.join(timeout=timeout)
         if proc.is_alive():
-            proc.kill()
-        msg = f"Analysis exceeded {timeout}s — file likely corrupt or unreadable"
-        return {
-            "synapse": ("error", msg) if needs_synapse else None,
-            "vi": ("error", msg) if needs_vi else None,
-        }
-
-    if result_queue.empty():
-        msg = "Analysis process exited without a result (crashed)"
-        return {
-            "synapse": ("error", msg) if needs_synapse else None,
-            "vi": ("error", msg) if needs_vi else None,
-        }
-
-    return result_queue.get()
+            return failed(f"Analysis exceeded {timeout}s — file may be unreadable or analysis stalled")
+        try:
+            # Queue.empty() is unreliable even after a worker has exited.
+            return result_queue.get(timeout=1)
+        except Empty:
+            return failed(f"Analysis process exited without a result (exit code {proc.exitcode})")
+    finally:
+        if started:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join()
+            proc.close()
+        result_queue.close()
+        result_queue.join_thread()
 
 
 def estimate(plex, samples_per_format=2, max_candidates_per_format=8):
@@ -619,6 +635,7 @@ def _write_with_retry(conn, sql, params, max_attempts=5, base_delay=0.5):
 def run_analysis(conn, plex, limit=None):
     print("MusicMind for Plex - Synapse + VI Audio Analysis")
     print("=" * 40)
+    print(f"Analyzing up to the first {MAX_ANALYSIS_AUDIO_SECONDS // 60} minutes of each track.")
 
     vi_available = vi_model_available()
     if vi_available:
